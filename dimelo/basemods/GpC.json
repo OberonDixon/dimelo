@@ -1,0 +1,23 @@
+{
+    "identifier":"G:C+m:N",
+    "description":"5-Methylcytosine preceded by guanine",
+    "upstream_context":[["G"]],
+    "downstream_context":[["A","T","C","G"]],
+    "modified_base":"C",
+    "modified_base_label_position":0,
+    "ambiguity_resolution":0,
+    "modification_label_by_pipeline":{
+        "nanopore_megalodon":"Z",
+        "nanopore_guppy":"m"
+    },
+    "modification_label_position_by_pipeline":{
+        "nanopore_megalodon":2,
+        "nanopore_guppy":2
+    },
+    "plot_specifications":{
+        "default_color":"b",
+        "default_threshold":0,
+        "default_offset":0,
+        "default_colormap":"unk"
+    }
+}

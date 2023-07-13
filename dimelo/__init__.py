@@ -14,6 +14,8 @@ dimelo allows you to perform quality control and plot modified bases from bam fi
 
 """
 from .parse_bam import parse_bam
+from .parse_bam import parse_bam_deprecated
+from .parse_bam import explore_bam
 from .plot_browser import plot_browser
 from .plot_enrichment import plot_enrichment
 from .plot_enrichment_profile import plot_enrichment_profile

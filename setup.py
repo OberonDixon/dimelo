@@ -27,6 +27,7 @@ REQUIRED_PACKAGES = [
     "pyranges==0.0.104",
     "psutil==5.8.0",
     "pybedtools==0.8.1",
+    "pysam==0.21.0",
     "kaleido==0.2.1",
     "sorted-nearest==0.0.33",  # pin to 0.0.33 to avoid import error (https://github.com/pyranges/sorted_nearest/issues/5)
     "sphinx==4.4.0",
