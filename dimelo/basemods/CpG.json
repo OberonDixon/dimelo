@@ -5,14 +5,16 @@
     "downstream_context":[["G"]],
     "modified_base":"C",
     "modified_base_label_position":0,
-    "ambiguity_resolution":0,
+    "keep_if_ambiguous":true,
     "modification_label_by_pipeline":{
         "nanopore_megalodon":"Z",
-        "nanopore_guppy":"m"
+        "nanopore_guppy":"m",
+        "nanopore_dorado":"m"
     },
     "modification_label_position_by_pipeline":{
         "nanopore_megalodon":2,
-        "nanopore_guppy":2
+        "nanopore_guppy":2,
+        "nanopore_dorado":2
     },
     "plot_specifications":{
         "default_color":"b",
