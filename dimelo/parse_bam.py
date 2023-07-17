@@ -499,7 +499,169 @@ def parse_bam(
     referenceGenome: str = None,
     cores: int=None,
 ) -> (dict,dict):
-    bam = pysam.AlignmentFile(fileName, "rb", check_sq=True)
+
+    ########################################################################################
+    # Check input parameters
+    ########################################################################################     
+    
+    # Ensure exactly one of bedFile and region are specified
+    if sum([arg is None for arg in (bedFile, region)]) != 1:
+        raise RuntimeError(
+            "Exactly one of the mutually exclusive arguments 'bedFile' or 'region' must be specified."
+        )
+    # The argument center is incompatible with region
+    if region is not None:
+        if center:
+            raise RuntimeError(
+                "Argument 'center' cannot be given alongside 'region'."
+            )
+    
+    ########################################################################################
+    # Create BaseMods object to load basemod configurations
+    ########################################################################################    
+    
+    base_mods = BaseMods()
+    
+    ########################################################################################
+    # Set up the list of region objects to analyze
+    ########################################################################################
+
+    if bedFile is not None:
+        # make a region object for each row of bedFile
+        bed = pd.read_csv(bedFile, sep="\t", header=None)
+        windows = []
+        for _, row in bed.iterrows():
+            windows.append(Region(row))
+
+    if region is not None:
+        windows = [Region(region)]
+    
+    ########################################################################################
+    # Create output directory and necessary output files
+    ########################################################################################
+    
+    if not os.path.isdir(outDir):
+        os.makedirs(outDir)
+
+    make_db(fileName, sampleName, outDir)
+
+
+    ########################################################################################
+    # Configure progress reporting
+    ########################################################################################
+    
+    if len(windows) == 1:
+        show_read_progress = True
+    else:
+        show_read_progress = False
+        # Enable top-level progress bar for multi-window processing
+        windows = tqdm(windows, desc="Parsing windows", unit="windows")
+
+    ########################################################################################
+    # Configure parallelization across cores
+    ########################################################################################
+    # default number of cores is max available
+    cores_avail = multiprocessing.cpu_count()
+    if cores is None:
+        num_cores = cores_avail
+    else:
+        # if more than available cores is specified, process with available cores
+        if cores > cores_avail:
+            num_cores = cores_avail
+        else:
+            num_cores = cores
+    
+    # Fully sequential case        
+    if num_cores<2:
+        for window in windows:
+            parse_subregion((window,'only'))
+    # Assign at least one core to the saving operations and the rest to processing
+    # Divide workload evenly, i.e. the same total basepairs of reads to each core
+    else:
+        ########################################################################################
+        # Determine read counts
+        ########################################################################################            
+    
+        bam = pysam.AlignmentFile(fileName, "rb", check_sq=True)
+        
+        windowwise_positions = {}
+        windowwise_readlens = {}
+        
+        for window in windows:
+            positions = []
+            readlens = []
+            for read in bam.fetch(reference=window.chromosome,start=window.begin,end=window.end):
+                positions.append(read.pos)
+                readlens.append(read.query_alignment_length)
+            windowwise_positions[window]=positions
+            windowwise_readlens[window]=readlens
+            
+        total_readlen = sum([sum(readlens) for readlens in windowwise_readlens.values()])
+        approx_bases_per_core = (total_readlen//(num_cores - 1))+1
+        
+        print('total and per core:',total_readlen,approx_bases_per_core)
+        
+        ########################################################################################
+        # Build dict of dicts of lists to contain (subregion,type_label) ready to assign to cores
+        ########################################################################################
+        
+        core_assignments = {core_index:{} for core_index in range(num_cores-1)}
+        
+        core_index = 0
+        # We will add reads to a core until we reach this value, then split to a new subregion
+        bases_assigned_to_core = 0
+        
+        # Iterate through the positions and readlens for reads identified in each window
+        for (window,positions,readlens) in [(window,windowwise_positions[window],windowwise_readlens[window]) 
+                                            for window in windows]:
+            # As we start a new window, create an empty list to store subregions for that window
+            # and define a new subregion starting there. The first subregion will have type_label 'first',
+            # meaning reads saved from these subregions are truncated at the start so they don't go out-of-coordinate-range
+            core_assignments[core_index][window] = []
+            subregion_start = window.begin
+            type_label = 'first'
+            # Iterate through the position and readlen values for reads in this window
+            for position,readlen in zip(positions,readlens):
+                # If we have exceeded the per-core approximate limit, define a new subregion
+                if bases_assigned_to_core > approx_bases_per_core:
+                    subregion_end = position-1
+                    core_assignments[core_index][window].append(
+                        (Region(pd.Series([window.chromosome,subregion_start,subregion_end])),
+                         type_label))
+                    subregion_start = position
+                    core_index += 1
+                    core_assignments[core_index][window] = []
+                    bases_assigned_to_core = 0
+                    # All subregions after the first per window are 'internal', meaning reads
+                    # they save should never be truncated on either end
+                    type_label = 'internal'
+                # Add the bases from the current read to the total for the core
+                # This is after the check so that we err on the side of more bases per core,
+                # ensuring we never assign more cores than we have (i.e. we will assign a bit too
+                # much to all the cores except the last, which is ok)
+                bases_assigned_to_core += readlen
+            if subregion_start < window.end:
+                if subregion_start == window.begin:
+                    # If a window is not split at all into different subregions, its reads get
+                    # truncated at both the beginning and the end
+                    type_label = 'only'
+                else:
+                    # The last subregion of a region has reads it saves truncated at the end
+                    type_label = 'last'
+                core_assignments[core_index][window].append(
+                    (Region(pd.Series([window.chromosome,subregion_start,window.end])),
+                     type_label))
+                    
+        print(core_assignments)
+        
+    # The next step here will be to pass the task lists down the the task runner
+    # Filenames saved by the subregion parsing function will have names derived from the tasklist metadata
+    # Then, parse_bam can merge the files and delete the temporary folder/locations
+    
+    ######################
+    # The remainder here is old code that will be replaced once the task parallelization stuff is working
+    ######################
+        
     if region is not None:
         window = Region(region)
         print(window.chromosome,window.begin,window.end)
@@ -510,7 +672,7 @@ def parse_bam(
         genome = pysam.FastaFile(referenceGenome)
     else:
         genome = None
-    base_mods = BaseMods()
+    
     modified_pile_dict = {}
     valid_pile_dict = {}
     pile_coordinates = np.arange(window.begin,window.end)
@@ -569,16 +731,21 @@ def parse_bam(
     return (pile_coordinates,valid_pile_dict,modified_pile_dict)
 #             print(f'highest pileup so far is {max(valid_pile_dict[basemods[0]])}')
 
-def parse_region(
-    fileName: str
+def parse_subregions_taskrunner(
+    fileName: str,
+    single_core_assignment: dict,
 ) -> None:
-    print('parsing region')
-
-def parse_reads(
-    fileName: str
-) -> None:
-    print('dank memer')
-
+    for window,subregions in single_core_assignment:
+        window_bam = pysam.AlignmentFile(fileName,'rb',check_sq=True)
+        for subregion in subregions:
+            parse_subregion(subregion)
+            
+def parse_subregion(
+    subregion,
+):
+    # Calls the read by basemod parser for each read in the subregion
+    # Pulls in the readwise info and completes the pileup operation
+    # Saves to appropriate formats as a batch, writing to its own file
 
 def explore_bam(
     fileName: str,
