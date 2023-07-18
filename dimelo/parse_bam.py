@@ -28,6 +28,8 @@ from Bio.Seq import Seq
 
 from dimelo.utils import clear_db, create_sql_table, execute_sql_command
 
+from . import readparser
+
 DEFAULT_BASEMOD = "A+CG"
 DEFAULT_BASEMODS = ('N:A+m:N','N:C+m:G')
 DEFAULT_THRESH_A = 129
@@ -543,7 +545,7 @@ def parse_bam(
     if not os.path.isdir(outDir):
         os.makedirs(outDir)
 
-    make_db(fileName, sampleName, outDir)
+    # make_db(fileName, sampleName, outDir)
 
 
     ########################################################################################
@@ -743,6 +745,7 @@ def parse_subregions_taskrunner(
 def parse_subregion(
     subregion,
 ):
+    x=1
     # Calls the read by basemod parser for each read in the subregion
     # Pulls in the readwise info and completes the pileup operation
     # Saves to appropriate formats as a batch, writing to its own file
