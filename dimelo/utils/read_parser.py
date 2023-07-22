@@ -18,7 +18,7 @@ from Bio.Seq import Seq
 from typing import List, Tuple, Union
 
 config_dicts = {}
-config_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),'basemods')
+config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'basemods')
 for filename in os.listdir(config_dir):
     if filename.endswith('.json'):
         file_path = os.path.join(config_dir,filename)
@@ -60,7 +60,7 @@ def parse_read_by_basemod(
      - the string of the reference sequence
 
     """
-    if basemod_identifier not in self._configs:
+    if basemod_identifier not in CONFIGS:
         print('error: basemod config is absent')
 
     config = CONFIGS[basemod_identifier]
@@ -172,9 +172,13 @@ def parse_read_by_basemod(
     if validate_with_reference:
 #             for index in valid_indices[1:-2]:
 #                 print(basemod,ref_seq(reference_positions_rel[index-1:index+1]))
-        modified_indices = [index for index in modified_indices if ref_seq[reference_positions_rel[index]]
+        modified_indices = [index for index in modified_indices 
+                            if reference_positions_rel[index]<len(ref_seq) 
+                            and ref_seq[reference_positions_rel[index]]
                                 .upper()==config['modified_base']]
-        valid_indices = [index for index in valid_indices if ref_seq[reference_positions_rel[index]]
+        valid_indices = [index for index in valid_indices 
+                         if reference_positions_rel[index]<len(ref_seq) 
+                         and ref_seq[reference_positions_rel[index]]
                              .upper()==config['modified_base']]
 
     modified_validated_count = len(modified_indices)
@@ -289,7 +293,7 @@ def resolve_basemod_ambiguities(
     """
     # Create a set of which possibilites there are for modified bases, i.e. which are the possible central
     # bases for varying contexts against which we want to check
-    all_modified_base_options = set([config['modified_base'] for config in self.CONFIGS.values()])
+    all_modified_base_options = set([config['modified_base'] for config in CONFIGS.values()])
     # Stack the valid coordinates list and modified coordinates list into numpy arrays for fast indexing
     valid_stack = np.stack(valid_list)
     modified_stack = np.stack(modified_list)
@@ -302,7 +306,7 @@ def resolve_basemod_ambiguities(
                              if CONFIGS[basemod]['modified_base']==modified_base],
                                      dtype=int)
         stack_coordinates_do_not_keep = np.array([coordinate for coordinate in stack_coordinates
-                                                 if self._configs[basemods[coordinate]]['keep_if_ambiguous'] is False])
+                                                 if CONFIGS[basemods[coordinate]]['keep_if_ambiguous'] is False])
 
         # We only need to overwrite anything if at least one of the basemods centered on modified_base has keep_if_ambiguous
         # set to False, otherwise we can just skip to the next modified_base option

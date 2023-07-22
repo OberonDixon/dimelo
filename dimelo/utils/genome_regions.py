@@ -1,0 +1,223 @@
+import pandas as pd
+from typing import List, Union
+import pysam
+from collections import defaultdict
+
+class Region(object):
+    def __init__(self, region: Union[str, pd.Series]):
+        """Represents a region of genetic data.
+        Attributes:
+                - chromosome: string name of the chromosome to which the region applies
+                - begin: integer start position of region
+                - end: integer end position of region
+                - size: length of region
+                - string: string representation of region
+                - strand: string specifying forward or reverse strand; either "+" or "-" (default +)
+        """
+        self.chromosome = None
+        self.begin = None
+        self.end = None
+        self.size = None
+        self.string = None
+        self.strand = "+"
+
+        if isinstance(region, str):  # ":" in region:
+            # String of format "{CHROMOSOME}:{START}-{END}"
+            try:
+                self.chromosome, interval = region.replace(",", "").split(":")
+                try:
+                    # see if just integer chromosomes are used
+                    self.chromosome = int(self.chromosome)
+                except ValueError:
+                    pass
+                self.begin, self.end = [int(i) for i in interval.split("-")]
+            except ValueError:
+                raise TypeError(
+                    "Invalid region string. Example of accepted format: 'chr5:150200605-150423790'"
+                )
+            self.size = self.end - self.begin
+            self.string = f"{self.chromosome}_{self.begin}_{self.end}"
+        elif isinstance(region, pd.Series):
+            # Ordered sequence containing [CHROMOSOME, START, END] and optionally [STRAND], where STRAND can be either "+" or "-"
+            self.chromosome = region[0]
+            self.begin = region[1]
+            self.end = region[2]
+            self.size = self.end - self.begin
+            self.string = f"{self.chromosome}_{self.begin}_{self.end}"
+            # strand of motif to orient single molecules
+            # if not passed just keep as all +
+            if len(region) >= 4:
+                if (region[3] == "+") or (region[3] == "-"):
+                    self.strand = region[3]
+                # handle case of bed file with additional field that isn't strand +/-
+                else:
+                    self.strand = "+"
+            else:
+                self.strand = "+"
+        else:
+            raise TypeError(
+                "Unknown datatype passed for Region initialization"
+            )
+            
+class SubregionTask(Region):
+    VALID_POSITIONS = {'first', 'internal', 'last', 'only'}
+    
+    def __init__(
+        self, 
+        fileName:str,
+        region: Union[str, pd.Series, Region], 
+        intraregion_position: str,
+        task_bases:int,
+    ):
+        if isinstance(region,str) or isinstance(region,pd.Series):
+            super().__init__(region)
+        elif isinstance(region,Region):
+            # If a Region object is passed in, copy its attributes
+            self.chromosome = region.chromosome
+            self.begin = region.begin
+            self.end = region.end
+            self.size = region.size
+            self.string = region.string
+            self.strand = region.strand
+        
+        if intraregion_position not in self.VALID_POSITIONS:
+            raise ValueError(f"Invalid intraregion_position. Accepted values are {self.VALID_POSITIONS}")
+        
+        self.intraregion_position = intraregion_position
+        self.bam_file = fileName
+        self.task_bases = task_bases
+
+class SingleProcessTasks:
+    def __init__(
+        self,
+        process_id: int,
+    ):
+        self.process_id = process_id
+        self.tasks = defaultdict(list)
+        self.total_bases = 0
+    def add_task(
+        self,
+        region: Region,
+        subregion_task: SubregionTask,
+    ):
+        self.tasks[region.string].append(subregion_task)
+        self.total_bases += subregion_task.task_bases
+class ProcesswiseTaskBuilder:
+    def __init__(
+        self, 
+        region_list: List[Region], 
+        fileName: str,
+        num_cores: int, 
+        mem_allowance: int,
+    ):
+        self.region_list = region_list
+ 
+        self.construct_loadbalanced_tasks(
+            fileName=fileName,
+            num_cores=num_cores,
+            batch_num_bases=mem_allowance/16
+        )
+    def construct_loadbalanced_tasks(
+        self, 
+        fileName: str,
+        num_cores: int,
+        batch_num_bases: int,
+    ):     
+        # Map out read across regions
+        
+        bam = pysam.AlignmentFile(fileName,"rb",check_sq=True)
+        
+        regionwise_read_positions = {}
+        regionwise_read_lengths = {}
+        
+        for region in self.region_list:
+            positions = []
+            readlens = []
+            for read in bam.fetch(reference=region.chromosome,start=region.begin,end=region.end):
+                positions.append(read.pos)
+                readlens.append(read.query_alignment_length)
+            regionwise_read_positions[region]=positions
+            regionwise_read_lengths[region]=readlens
+            
+        total_read_bases = sum([sum(readlens) for readlens in regionwise_read_lengths.values()])
+        approx_bases_per_core = (total_read_bases//num_cores)+1
+        
+        # Build single process task lists
+        self.core_assignments = {}
+        core_index = 0
+        self.core_assignments[core_index] = SingleProcessTasks(core_index)
+                
+        # We will add reads to a batch until we reach this value, then split to a new subregion
+        bases_in_batch = 0
+        # We will add subregions to a core until we reach this value, then go to the next core
+        bases_assigned_to_core = 0
+        
+        # Iterate through the positions and readlens for reads identified in each window
+        for (region,positions,readlens) in [(region,regionwise_read_positions[region],regionwise_read_lengths[region]) 
+                                            for region in self.region_list]:
+            # The first subregion will have type_label 'first', meaning reads saved from these subregions 
+            # are truncated at the start so they don't go out-of-coordinate-range
+            subregion_start = region.begin
+            type_label = 'first'
+            # Iterate through the position and readlen values for reads in this window
+            for position,readlen in zip(positions,readlens):
+                # If we have exceeded the batch size, define a new subregion
+                if bases_in_batch > batch_num_bases:
+                    subregion_end = position-1
+                    self.core_assignments[core_index].add_task(
+                        region,
+                        SubregionTask(
+                            fileName,
+                            pd.Series([region.chromosome,subregion_start,subregion_end]),
+                            type_label,
+                            bases_in_batch,
+                        )
+                    )
+                    subregion_start = position
+                    bases_in_batch = 0
+                # If we have exceeded the per-core approximate limit, define a new subregion and a new
+                # SingleProcessTasks entry
+                if bases_assigned_to_core > approx_bases_per_core:
+                    subregion_end = position-1
+                    self.core_assignments[core_index].add_task(
+                        region,
+                        SubregionTask(
+                            fileName,
+                            pd.Series([region.chromosome,subregion_start,subregion_end]),
+                            type_label,
+                            bases_in_batch,
+                        )
+                    )
+                    subregion_start = position
+                    core_index += 1
+                    self.core_assignments[core_index] = SingleProcessTasks(core_index)
+                    bases_assigned_to_core = 0
+                    bases_in_batch = 0
+                    # All subregions after the first per window are 'internal', meaning reads
+                    # they save should never be truncated on either end
+                    type_label = 'internal'
+                # Add the bases from the current read to the total for the core
+                # This is after the check so that we err on the side of more bases per core,
+                # ensuring we never assign more cores than we have (i.e. we will assign a bit too
+                # much to all the cores except the last, which is ok)
+                bases_assigned_to_core += readlen
+                bases_in_batch += readlen
+            if subregion_start < region.end:
+                if subregion_start == region.begin:
+                    # If a window is not split at all into different subregions, its reads get
+                    # truncated at both the beginning and the end
+                    type_label = 'only'
+                else:
+                    # The last subregion of a region has reads it saves truncated at the end
+                    type_label = 'last'
+                self.core_assignments[core_index].add_task(
+                    region,
+                    SubregionTask(
+                        fileName,
+                        pd.Series([region.chromosome,subregion_start,region.end]),
+                        type_label,
+                        bases_in_batch,
+                    )
+                )
+        
+        

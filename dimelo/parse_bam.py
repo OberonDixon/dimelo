@@ -17,7 +17,7 @@ import os
 import json
 from typing import Tuple
 import sqlite3
-from typing import List, Tuple, Union
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,9 +26,9 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 from Bio.Seq import Seq
 
-from dimelo.utils import clear_db, create_sql_table, execute_sql_command
-
-from . import readparser
+from dimelo.utils.db_utils import clear_db, create_sql_table, execute_sql_command
+from dimelo.utils import file_saver, read_parser
+from dimelo.utils.genome_regions import Region, ProcesswiseTaskBuilder, SingleProcessTasks, SubregionTask
 
 DEFAULT_BASEMOD = "A+CG"
 DEFAULT_BASEMODS = ('N:A+m:N','N:C+m:G')
@@ -36,380 +36,6 @@ DEFAULT_THRESH_A = 129
 DEFAULT_THRESH_C = 129
 DEFAULT_WINDOW_SIZE = 1000
 
-
-class Region(object):
-    def __init__(self, region: Union[str, pd.Series]):
-        """Represents a region of genetic data.
-        Attributes:
-                - chromosome: string name of the chromosome to which the region applies
-                - begin: integer start position of region
-                - end: integer end position of region
-                - size: length of region
-                - string: string representation of region
-                - strand: string specifying forward or reverse strand; either "+" or "-" (default +)
-        """
-        self.chromosome = None
-        self.begin = None
-        self.end = None
-        self.size = None
-        self.string = None
-        self.strand = "+"
-
-        if isinstance(region, str):  # ":" in region:
-            # String of format "{CHROMOSOME}:{START}-{END}"
-            try:
-                self.chromosome, interval = region.replace(",", "").split(":")
-                try:
-                    # see if just integer chromosomes are used
-                    self.chromosome = int(self.chromosome)
-                except ValueError:
-                    pass
-                self.begin, self.end = [int(i) for i in interval.split("-")]
-            except ValueError:
-                raise TypeError(
-                    "Invalid region string. Example of accepted format: 'chr5:150200605-150423790'"
-                )
-            self.size = self.end - self.begin
-            self.string = f"{self.chromosome}_{self.begin}_{self.end}"
-        elif isinstance(region, pd.Series):
-            # Ordered sequence containing [CHROMOSOME, START, END] and optionally [STRAND], where STRAND can be either "+" or "-"
-            self.chromosome = region[0]
-            self.begin = region[1]
-            self.end = region[2]
-            self.size = self.end - self.begin
-            self.string = f"{self.chromosome}_{self.begin}_{self.end}"
-            # strand of motif to orient single molecules
-            # if not passed just keep as all +
-            if len(region) >= 4:
-                if (region[3] == "+") or (region[3] == "-"):
-                    self.strand = region[3]
-                # handle case of bed file with additional field that isn't strand +/-
-                else:
-                    self.strand = "+"
-            else:
-                self.strand = "+"
-        else:
-            raise TypeError(
-                "Unknown datatype passed for Region initialization"
-            )
-
-class BaseMods:
-    def __init__(self):
-        self._configs = self.load_configs()
-        
-    def load_configs(self):
-        config_dicts = {}
-        config_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),'basemods')
-        for filename in os.listdir(config_dir):
-            if filename.endswith('.json'):
-                file_path = os.path.join(config_dir,filename)
-
-                with open(file_path,'r') as f:
-                    data = json.load(f)
-                    identifier = data.get('identifier',None)
-                    if identifier is not None:
-                        # Convert to a tuple of sets because that should be faster for running verifications later
-                        upstream_context_array_of_arrays = data['upstream_context']
-                        upstream_context_tuple_of_sets = tuple(set(sub_array) for sub_array in upstream_context_array_of_arrays)
-                        data['upstream_context'] = upstream_context_tuple_of_sets
-                        downstream_context_array_of_arrays = data['downstream_context']
-                        downstream_context_tuple_of_sets = tuple(set(sub_array) for sub_array in downstream_context_array_of_arrays)  
-                        data['downstream_context'] = downstream_context_tuple_of_sets
-                        config_dicts[identifier] = data                  
-                    else:
-                        print(f'Warning: basemod config {filename} is missing the "identifier" field')
-        return config_dicts
-    
-    def parse_read_by_basemod(
-        self,
-        read:pysam.AlignedSegment,
-        basemod_identifier:str,
-        context_check_source:str='read',
-        validate_with_reference:bool=False,
-        genome:pysam.FastaFile=None,
-        pipeline:str=None,
-        threshold:int=128
-    ) -> Tuple[np.ndarray,np.ndarray,np.ndarray,str]:
-        """Pulls out arrays of modified and correctly contextualized bases for a given read and base modification
-        
-        Args:
-        
-        Returns:
-        
-         - reference coordinates array (length same as read length)
-         - context-satisfying bases (length same as read length)
-         - modified context-satisfying bases (length same as read length)
-         - the string of the reference sequence
-        
-        """
-        if basemod_identifier not in self._configs:
-            print('error: basemod config is absent')
-       
-        config = self._configs[basemod_identifier]
-        modified_bases = read.modified_bases
-        basemod_key = None
-        ########################################################################################
-        # Identify basemod key
-        ########################################################################################
-        # The key format in the modified_bases dict from pysam is a tuple containing 
-        # (modified_base,strand,modification_label)
-        # This code currently does NOT check modification_label and should be modified to do so
-        if modified_bases is not None:
-            valid_key_counter = 0
-            for key in modified_bases.keys():
-#                 print(config['modified_base'])
-#                 print(pipeline)
-                if (key[config['modified_base_label_position']]==config['modified_base'] and
-                    (pipeline is None 
-                    or key[config['modification_label_position_by_pipeline'][pipeline]]
-                        ==config['modification_label_by_pipeline'][pipeline])):
-                    basemod_key = key
-#                     print(basemod_key)
-                    valid_key_counter += 1
-            if valid_key_counter>1:
-                print('error: more than one base modification label in .bam file. please specify pipeline and ensure .json config files contain appropriate label details.')
-#             if valid_key_counter==0:
-#                 print(list(modified_bases.keys()))
-        ########################################################################################
-        # Extract indices for modified bases that meet the threshold to be counted
-        ########################################################################################
-        # These indices tell us where, relative to the start of the read, we can find bases
-        # that have been modified
-        forward_sequence = read.get_forward_sequence()
-        if forward_sequence is not None:
-            valid_indices = range(0,len(read.get_forward_sequence()))
-            if basemod_key is not None:               
-                if threshold>0:
-                    modified_indices = [coord_prob_tuple[0] for coord_prob_tuple 
-                                        in modified_bases[basemod_key] if coord_prob_tuple[1]>=threshold]
-                else:
-                    modified_indices = [coord_prob_tuple[0] for coord_prob_tuple 
-                                        in modified_bases[basemod_key]]
-            else:
-                modified_indices = []
-        else:
-            valid_indices = []
-            modified_indices = []
-        ########################################################################################
-        # Load up and process the read sequence for later comparisons, if needed
-        ########################################################################################
-        if context_check_source in ('read','both'):
-            if read.is_forward:
-                read_seq = read.query_sequence
-            else:
-                read_seq = str(Seq(read.query_sequence).complement())
-#             print('read:',read_seq[0:10])
-        else:
-            read_seq = None
-            
-        
-#         print('is_forward:',read.is_forward)
-        
-        
-
-        ########################################################################################
-        # Extract reference genome coordinates for read bases
-        ########################################################################################
-        # We always need this, because in order to have a single coordinate system for our pileups
-        # we can't use the read coordinate system: reads have insertions and deletions sometimes
-        reference_positions = read.get_reference_positions(full_length=True)
-        read_start = min(coord for coord in reference_positions if coord is not None)
-        read_end = max(coord for coord in reference_positions if coord is not None)+1
-        reference_positions_rel = [position-read_start if position is not None else None for position in reference_positions]
-        # If an index for a modified base has no corresponding reference genome coordinate,
-        # we have no way of making that meaningful
-        # The assumption here has to be that if the user wants their reads to get piled up or
-        # peak called in a non-standard genome, they provide that .fasta for the upstream processing
-        # steps i.e. the .bam file is aligned to it, and thus read.get_reference_positions() does not
-        # return None for insertions
-        valid_indices = [index for index in valid_indices if reference_positions[index] is not None]
-        modified_indices = [index for index in modified_indices if reference_positions[index] is not None]
-#         print('start-end',read_start,read_end)
-
-        ########################################################################################
-        # Load up the reference genome segment if needed
-        ########################################################################################
-        # We want to complement if on the reverse strand but NOT reverse complement, because our
-        # reference_positions coordinates are not reversed but our context bases need to be complemented
-        if validate_with_reference or context_check_source in ('reference','both'):
-            fetched_seq = genome.fetch(read.reference_name,read_start,read_end)
-            if read.is_forward:
-                ref_seq = str(fetched_seq)
-            else:                       
-                ref_seq = str(Seq(str(fetched_seq)).complement())
-        else:
-            ref_seq = None
-            
-#         if ref_seq is not None:
-#             print('ref:',ref_seq[0:10])
-
-        ########################################################################################
-        # Adjust indices to remove basemods that whose basecall doesn't match the reference
-        ########################################################################################
-        # If validate_with_reference is True, the index of bases that don't line up with the reference
-        # is not counted as "modified" or "unmodified" it is simply removed from the list entirely
-        modified_unvalidated_count = len(modified_indices)
-        all_unvalidated_count = len(valid_indices)
-
-        if validate_with_reference:
-#             for index in valid_indices[1:-2]:
-#                 print(basemod,ref_seq(reference_positions_rel[index-1:index+1]))
-            modified_indices = [index for index in modified_indices if ref_seq[reference_positions_rel[index]]
-                                    .upper()==config['modified_base']]
-            valid_indices = [index for index in valid_indices if ref_seq[reference_positions_rel[index]]
-                                 .upper()==config['modified_base']]
-
-        modified_validated_count = len(modified_indices)
-        all_validated_count = len(valid_indices)
-#         print('validate?',validate_with_reference)
-#         if validate_with_reference:
-#             print('fraction that check out with reference',modified_validated_count/modified_unvalidated_count)
-
-        ########################################################################################
-        # Check upstream context
-        ########################################################################################
-        # If a base does not meet context requirements, its index is removed from the list
-        # Context can be checked in the read itself, in the reference, or in both
-        # We check one at a time which may not be optimal for multi-base context but is more readable
-        # Upstream is reversed by convention because we are stepping our context distance upwards but
-        # the upstream_context specifiers are in forward strand order
-        for context_index,bases in enumerate(reversed(config['upstream_context'])):
-            # If any base is valid, no more compute need be wasted
-            if bases.issuperset(set(['A','T','C','G'])):
-                continue
-            else:
-                if read.is_forward:
-                    distance = -context_index-1
-                else:
-                    distance = context_index+1
-                if context_check_source in ('reference','both'):
-                    modified_indices = [index for index in modified_indices 
-                                        if len(reference_positions)>index+distance>0 
-                                        and reference_positions[index+distance] is not None 
-                                        and ref_seq[reference_positions_rel[index+distance]].upper() in bases]
-                    valid_indices = [index for index in valid_indices 
-                                     if len(reference_positions)>index+distance>0 
-                                     and reference_positions[index+distance] is not None 
-                                     and ref_seq[reference_positions_rel[index+distance]].upper() in bases]
-                if context_check_source in ('read','both'):
-                    modified_indices = [index for index in modified_indices 
-                                        if len(read_seq)>index+distance>0 
-                                        and read_seq[index+distance] in bases]
-                    valid_indices = [index for index in valid_indices 
-                                     if len(read_seq)>index+distance>0 
-                                     and read_seq[index+distance] in bases]
-
-
-        ########################################################################################
-        # Check downstream context
-        ########################################################################################
-        # If a base does not meet context requirements, its index is removed from the list
-        # Context can be checked in the read itself, in the reference, or in both
-        # We check one at a time which may not be optimal for multi-base context but is more readable               
-        for context_index,bases in enumerate(config['downstream_context']):
-            # If any base is valid, no more compute need be wasted
-            if bases.issuperset(set(['A','T','C','G'])):
-                continue
-            else:
-                if read.is_forward:
-                    distance = context_index+1
-                else:
-                    distance = -context_index-1
-                if context_check_source in ('reference','both'):
-                    modified_indices = [index for index in modified_indices 
-                                        if 0<index+distance<len(reference_positions) 
-                                        and reference_positions[index+distance] is not None 
-                                        and ref_seq[reference_positions_rel[index+distance]].upper() in bases]
-                    valid_indices = [index for index in valid_indices 
-                                     if 0<index+distance<len(reference_positions) 
-                                     and reference_positions[index+distance] is not None 
-                                     and ref_seq[reference_positions_rel[index+distance]].upper() in bases]
-                if context_check_source in ('read','both'):
-                    modified_indices = [index for index in modified_indices 
-                                        if 0<index+distance<len(read_seq) 
-                                        and read_seq[index+distance] in bases]  
-                    valid_indices = [index for index in valid_indices 
-                                     if 0<index+distance<len(read_seq) 
-                                     and read_seq[index+distance] in bases]  
-
-        modified_contextualized_count = len(modified_indices)
-        all_contextualized_count = len(valid_indices)
-
-        ########################################################################################
-        # Build output arrays
-        ######################################################################################## 
-        #
-
-#                 print('modified contextualized/correct base/all'
-#                       ,modified_contextualized_count,'of',modified_validated_count,'of',modified_unvalidated_count)
-#                 print('all contextualized/correct base/all'
-#                       ,all_contextualized_count,'of',all_validated_count,'of',all_unvalidated_count)
-
-        reference_coordinates = np.arange(read_start,read_end)
-        valid_coordinates = np.zeros(read_end-read_start)
-#         print('valid indices ndarray type ',np.array(valid_indices).dtype)
-#         print('reference positions rel ndarray type',np.array(reference_positions_rel).dtype)
-
-        if len(valid_indices)>0:
-            valid_coordinates[np.array(reference_positions_rel)[np.array(valid_indices)].astype(int)] = 1
-        modified_coordinates = np.zeros(read_end-read_start)
-        if len(modified_indices)>0:
-            if threshold>0:
-                modified_coordinates[np.array(reference_positions_rel)[np.array(modified_indices)].astype(int)] = 1
-            else:
-                modified_indices_set = set(modified_indices)
-                filtered_modified_bases_tuples = [t for t in modified_bases[basemod_key] if t[0] in modified_indices_set]
-                filtered_indices,filtered_values = zip(*filtered_modified_bases_tuples)
-                modified_coordinates[np.array(reference_positions_rel)
-                                     [np.array(filtered_indices)].astype(int)] = filtered_values/255
-
-        return (reference_coordinates,valid_coordinates,modified_coordinates,ref_seq)
-            
-    def resolve_basemod_ambiguities(
-        self,
-        basemods,
-        valid_list,
-        modified_list,      
-    ) -> Tuple[list,list]:
-        """Uses the .json config properties to guide decisions on treating base modifications with multiple valid contexts
-        "
-        " This version of resolve_basemod_ambiguities actually doesn't properly handle the fact that we *can* distinguish, 
-        " in principle, between different modifications on the same base in the same context. It would be easy to fix that, 
-        " the requisite information is already in the .json files, but with no use case or test case I decided not to implement
-        " a solution at this time.
-        """
-        # Create a set of which possibilites there are for modified bases, i.e. which are the possible central
-        # bases for varying contexts against which we want to check
-        all_modified_base_options = set([config['modified_base'] for config in self._configs.values()])
-        # Stack the valid coordinates list and modified coordinates list into numpy arrays for fast indexing
-        valid_stack = np.stack(valid_list)
-        modified_stack = np.stack(modified_list)
-        
-        # For each possible modified base, find which of the specified basemods are accessing that base and what coordinates
-        # in the stacks corresponds to those basemods
-        for modified_base in all_modified_base_options:
-            stack_coordinates = np.array([coordinate for (coordinate,basemod) 
-                                 in enumerate(basemods) 
-                                 if self._configs[basemod]['modified_base']==modified_base],
-                                         dtype=int)
-            stack_coordinates_do_not_keep = np.array([coordinate for coordinate in stack_coordinates
-                                                     if self._configs[basemods[coordinate]]['keep_if_ambiguous'] is False])
-#             print(stack_coordinates,stack_coordinates_do_not_keep)
-            # We only need to overwrite anything if at least one of the basemods centered on modified_base has keep_if_ambiguous
-            # set to False, otherwise we can just skip to the next modified_base option
-            if len(stack_coordinates_do_not_keep)>0:           
-                sums = np.sum(valid_stack[stack_coordinates,:],axis=0)
-                # This is technically not perfectly efficient if the reason sums>1 if not due to any of the
-                # basemods within stack_coordinates_do_not_keep, but with only two basemod contexts per modifiable
-                # base that will not occur, and this will still work regardless
-                valid_stack[stack_coordinates_do_not_keep,sums>1] = 0
-                modified_stack[stack_coordinates_do_not_keep,sums>1] = 0
-        
-        valid_list = list(valid_stack)
-        modified_list = list(modified_stack)
-        
-        return (valid_list,modified_list)
-    
 def make_db(
     fileName: str,
     sampleName: str,
@@ -500,6 +126,7 @@ def parse_bam(
     checkAgainstRef: bool = False,
     referenceGenome: str = None,
     cores: int=None,
+    memory: int=None,
 ) -> (dict,dict):
 
     ########################################################################################
@@ -519,24 +146,18 @@ def parse_bam(
             )
     
     ########################################################################################
-    # Create BaseMods object to load basemod configurations
-    ########################################################################################    
-    
-    base_mods = BaseMods()
-    
-    ########################################################################################
     # Set up the list of region objects to analyze
     ########################################################################################
 
     if bedFile is not None:
         # make a region object for each row of bedFile
         bed = pd.read_csv(bedFile, sep="\t", header=None)
-        windows = []
+        regions = []
         for _, row in bed.iterrows():
-            windows.append(Region(row))
+            regions.append(Region(row))
 
     if region is not None:
-        windows = [Region(region)]
+        regions = [Region(region)]
     
     ########################################################################################
     # Create output directory and necessary output files
@@ -552,16 +173,16 @@ def parse_bam(
     # Configure progress reporting
     ########################################################################################
     
-    if len(windows) == 1:
+    if len(regions) == 1:
         show_read_progress = True
     else:
         show_read_progress = False
         # Enable top-level progress bar for multi-window processing
-        windows = tqdm(windows, desc="Parsing windows", unit="windows")
+        regions_tqdm = tqdm(regions, desc="Parsing windows", unit="windows")
 
     ########################################################################################
-    # Configure parallelization across cores
-    ########################################################################################
+    # Create task list and run parallel processes
+    ########################################################################################    
     # default number of cores is max available
     cores_avail = multiprocessing.cpu_count()
     if cores is None:
@@ -572,90 +193,37 @@ def parse_bam(
             num_cores = cores_avail
         else:
             num_cores = cores
+    processwise_tasks = ProcesswiseTaskBuilder(
+        regions,
+        fileName,
+        num_cores,
+        5000000000,
+    )
+        
+    Parallel(n_jobs=num_cores)(
+        delayed(run_single_process)(
+            tasks,
+            basemods,
+            context_check_source,
+            checkAgainstRef,
+            referenceGenome,
+            pipeline,
+            thresholds            
+        )
+        for tasks in processwise_tasks.core_assignments.values()
+    )
     
-    # Fully sequential case        
-    if num_cores<2:
-        for window in windows:
-            parse_subregion((window,'only'))
-    # Assign at least one core to the saving operations and the rest to processing
-    # Divide workload evenly, i.e. the same total basepairs of reads to each core
-    else:
-        ########################################################################################
-        # Determine read counts
-        ########################################################################################            
+#     for tasks in processwise_tasks.core_assignments.values():
+#         run_single_process(
+#             tasks,
+#             basemods,
+#             context_check_source,
+#             checkAgainstRef,
+#             genome,
+#             pipeline,
+#             thresholds
+#         )
     
-        bam = pysam.AlignmentFile(fileName, "rb", check_sq=True)
-        
-        windowwise_positions = {}
-        windowwise_readlens = {}
-        
-        for window in windows:
-            positions = []
-            readlens = []
-            for read in bam.fetch(reference=window.chromosome,start=window.begin,end=window.end):
-                positions.append(read.pos)
-                readlens.append(read.query_alignment_length)
-            windowwise_positions[window]=positions
-            windowwise_readlens[window]=readlens
-            
-        total_readlen = sum([sum(readlens) for readlens in windowwise_readlens.values()])
-        approx_bases_per_core = (total_readlen//(num_cores - 1))+1
-        
-        print('total and per core:',total_readlen,approx_bases_per_core)
-        
-        ########################################################################################
-        # Build dict of dicts of lists to contain (subregion,type_label) ready to assign to cores
-        ########################################################################################
-        
-        core_assignments = {core_index:{} for core_index in range(num_cores-1)}
-        
-        core_index = 0
-        # We will add reads to a core until we reach this value, then split to a new subregion
-        bases_assigned_to_core = 0
-        
-        # Iterate through the positions and readlens for reads identified in each window
-        for (window,positions,readlens) in [(window,windowwise_positions[window],windowwise_readlens[window]) 
-                                            for window in windows]:
-            # As we start a new window, create an empty list to store subregions for that window
-            # and define a new subregion starting there. The first subregion will have type_label 'first',
-            # meaning reads saved from these subregions are truncated at the start so they don't go out-of-coordinate-range
-            core_assignments[core_index][window] = []
-            subregion_start = window.begin
-            type_label = 'first'
-            # Iterate through the position and readlen values for reads in this window
-            for position,readlen in zip(positions,readlens):
-                # If we have exceeded the per-core approximate limit, define a new subregion
-                if bases_assigned_to_core > approx_bases_per_core:
-                    subregion_end = position-1
-                    core_assignments[core_index][window].append(
-                        (Region(pd.Series([window.chromosome,subregion_start,subregion_end])),
-                         type_label))
-                    subregion_start = position
-                    core_index += 1
-                    core_assignments[core_index][window] = []
-                    bases_assigned_to_core = 0
-                    # All subregions after the first per window are 'internal', meaning reads
-                    # they save should never be truncated on either end
-                    type_label = 'internal'
-                # Add the bases from the current read to the total for the core
-                # This is after the check so that we err on the side of more bases per core,
-                # ensuring we never assign more cores than we have (i.e. we will assign a bit too
-                # much to all the cores except the last, which is ok)
-                bases_assigned_to_core += readlen
-            if subregion_start < window.end:
-                if subregion_start == window.begin:
-                    # If a window is not split at all into different subregions, its reads get
-                    # truncated at both the beginning and the end
-                    type_label = 'only'
-                else:
-                    # The last subregion of a region has reads it saves truncated at the end
-                    type_label = 'last'
-                core_assignments[core_index][window].append(
-                    (Region(pd.Series([window.chromosome,subregion_start,window.end])),
-                     type_label))
-                    
-        print(core_assignments)
-        
     # The next step here will be to pass the task lists down the the task runner
     # Filenames saved by the subregion parsing function will have names derived from the tasklist metadata
     # Then, parse_bam can merge the files and delete the temporary folder/locations
@@ -664,32 +232,129 @@ def parse_bam(
     # The remainder here is old code that will be replaced once the task parallelization stuff is working
     ######################
         
-    if region is not None:
-        window = Region(region)
-        print(window.chromosome,window.begin,window.end)
-        reads = bam.fetch(reference=window.chromosome,start=window.begin,end=window.end)
-    else:
-        reads = bam.fetch()
+#     if region is not None:
+#         window = Region(region)
+#         print(window.chromosome,window.begin,window.end)
+#         reads = bam.fetch(reference=window.chromosome,start=window.begin,end=window.end)
+#     else:
+#         reads = bam.fetch()
+
+    
+#     modified_pile_dict = {}
+#     valid_pile_dict = {}
+#     pile_coordinates = np.arange(window.begin,window.end)
+#     print(min(pile_coordinates),max(pile_coordinates))
+#     for basemod_identifier in basemods:
+#         modified_pile_dict[basemod_identifier] = np.zeros(window.end-window.begin)
+#         valid_pile_dict[basemod_identifier] = np.zeros(window.end-window.begin)
+#     for read in reads:
+#         valid_coordinates_list = []
+#         modified_coordinates_list = []
+# #         print(read.query_name)
+# #         print(basemods)
+# #         print('pre disambiguaton (valid/modified)')
+#         for basemod_identifier in basemods:
+#             reference_coordinates,valid_coordinates,modified_coordinates,ref_seq = read_parser.parse_read_by_basemod(
+#                 read=read,
+#                 basemod_identifier=basemod_identifier,
+#                 context_check_source=context_check_source,
+#                 validate_with_reference=checkAgainstRef,
+#                 genome=genome,
+#                 pipeline=pipeline,
+#                 threshold=thresholds[0])
+# #             print(sum(valid_coordinates),sum(modified_coordinates))
+#             valid_coordinates_list.append(valid_coordinates)
+#             modified_coordinates_list.append(modified_coordinates)
+# #         print('reference coordinates for read (start/end)')
+# #         print(min(reference_coordinates),max(reference_coordinates))
+#         valid_coordinates_list_disambiguated,modified_coordinates_list_disambiguated = read_parser.resolve_basemod_ambiguities(
+#             basemods,
+#             valid_coordinates_list,
+#             modified_coordinates_list)
+        
+# #         print('post disambiguation (valid/modified)')
+# #         for list_index,_ in enumerate(valid_coordinates_list_disambiguated):
+# #             print(sum(valid_coordinates_list_disambiguated[list_index]),
+# #                   sum(modified_coordinates_list_disambiguated[list_index]))
+        
+#         # create masks for valid reference_coordinates
+#         valid_mask = (reference_coordinates >= pile_coordinates[0]) & (reference_coordinates <= pile_coordinates[-1])
+#         read_indices = np.searchsorted(pile_coordinates,reference_coordinates[valid_mask])
+# #         print('read_indices')
+# #         print(read_indices)
+        
+#         for basemod_index,basemod_identifier in enumerate(basemods):
+#             modified_pile_dict[basemod_identifier][read_indices]+=(modified_coordinates_list_disambiguated
+#                                                                    [basemod_index][valid_mask])
+#             valid_pile_dict[basemod_identifier][read_indices]+=(valid_coordinates_list_disambiguated
+#                                                                 [basemod_index][valid_mask])
+# #             print('sum and max modified/valid',basemod_identifier)
+# #             print(sum(modified_pile_dict[basemod_identifier]),sum(valid_pile_dict[basemod_identifier]))
+# #             print(max(modified_pile_dict[basemod_identifier]),max(valid_pile_dict[basemod_identifier]))
+        
+#         if read.pos%500==0:
+#             print(f'read pos {read.pos}')
+            
+    return(0,0,0)
+#     return (pile_coordinates,valid_pile_dict,modified_pile_dict)
+#             print(f'highest pileup so far is {max(valid_pile_dict[basemods[0]])}')
+
+def run_single_process(
+    process_tasklist: SingleProcessTasks,
+    basemods,
+    context_check_source,
+    checkAgainstRef,
+    referenceGenome,
+    pipeline,
+    thresholds,
+) -> None:
     if referenceGenome is not None:
         genome = pysam.FastaFile(referenceGenome)
     else:
         genome = None
-    
+        
+    for region_string,subregion_list in process_tasklist.tasks.items():
+        for subregion in subregion_list:
+            parse_subregion(
+                region_string,
+                subregion,
+                basemods,
+                context_check_source,
+                checkAgainstRef,
+                genome,
+                pipeline,
+                thresholds,
+            )
+            
+def parse_subregion(
+    region_string: str,
+    subregion: SubregionTask,
+    basemods,
+    context_check_source,
+    checkAgainstRef,
+    genome,
+    pipeline,
+    thresholds
+):
+    # Calls the read by basemod parser for each read in the subregion
+    # Pulls in the readwise info and completes the pileup operation
+    # Saves to appropriate formats as a batch, writing to its own file
+    bam = pysam.AlignmentFile(subregion.bam_file,"rb",check_sq=True)
+    # Create pileup files
     modified_pile_dict = {}
     valid_pile_dict = {}
-    pile_coordinates = np.arange(window.begin,window.end)
+    pile_coordinates = np.arange(subregion.begin,subregion.end)
     print(min(pile_coordinates),max(pile_coordinates))
     for basemod_identifier in basemods:
-        modified_pile_dict[basemod_identifier] = np.zeros(window.end-window.begin)
-        valid_pile_dict[basemod_identifier] = np.zeros(window.end-window.begin)
-    for read in reads:
+        modified_pile_dict[basemod_identifier] = np.zeros(subregion.end-subregion.begin)
+        valid_pile_dict[basemod_identifier] = np.zeros(subregion.end-subregion.begin)
+    # Iterate through reads
+    for read in bam.fetch(subregion.chromosome,subregion.begin,subregion.end):
         valid_coordinates_list = []
         modified_coordinates_list = []
-#         print(read.query_name)
-#         print(basemods)
-#         print('pre disambiguaton (valid/modified)')
+
         for basemod_identifier in basemods:
-            reference_coordinates,valid_coordinates,modified_coordinates,ref_seq = base_mods.parse_read_by_basemod(
+            reference_coordinates,valid_coordinates,modified_coordinates,ref_seq = read_parser.parse_read_by_basemod(
                 read=read,
                 basemod_identifier=basemod_identifier,
                 context_check_source=context_check_source,
@@ -697,58 +362,29 @@ def parse_bam(
                 genome=genome,
                 pipeline=pipeline,
                 threshold=thresholds[0])
-#             print(sum(valid_coordinates),sum(modified_coordinates))
+
             valid_coordinates_list.append(valid_coordinates)
             modified_coordinates_list.append(modified_coordinates)
-#         print('reference coordinates for read (start/end)')
-#         print(min(reference_coordinates),max(reference_coordinates))
-        valid_coordinates_list_disambiguated,modified_coordinates_list_disambiguated = base_mods.resolve_basemod_ambiguities(
+
+        (valid_coordinates_list_disambiguated,
+         modified_coordinates_list_disambiguated) = read_parser.resolve_basemod_ambiguities(
             basemods,
             valid_coordinates_list,
-            modified_coordinates_list)
-        
-#         print('post disambiguation (valid/modified)')
-#         for list_index,_ in enumerate(valid_coordinates_list_disambiguated):
-#             print(sum(valid_coordinates_list_disambiguated[list_index]),
-#                   sum(modified_coordinates_list_disambiguated[list_index]))
+            modified_coordinates_list
+        )        
         
         # create masks for valid reference_coordinates
         valid_mask = (reference_coordinates >= pile_coordinates[0]) & (reference_coordinates <= pile_coordinates[-1])
         read_indices = np.searchsorted(pile_coordinates,reference_coordinates[valid_mask])
-#         print('read_indices')
-#         print(read_indices)
         
         for basemod_index,basemod_identifier in enumerate(basemods):
             modified_pile_dict[basemod_identifier][read_indices]+=(modified_coordinates_list_disambiguated
                                                                    [basemod_index][valid_mask])
             valid_pile_dict[basemod_identifier][read_indices]+=(valid_coordinates_list_disambiguated
                                                                 [basemod_index][valid_mask])
-#             print('sum and max modified/valid',basemod_identifier)
-#             print(sum(modified_pile_dict[basemod_identifier]),sum(valid_pile_dict[basemod_identifier]))
-#             print(max(modified_pile_dict[basemod_identifier]),max(valid_pile_dict[basemod_identifier]))
         
         if read.pos%500==0:
-            print(f'read pos {read.pos}')
-            
-    return (pile_coordinates,valid_pile_dict,modified_pile_dict)
-#             print(f'highest pileup so far is {max(valid_pile_dict[basemods[0]])}')
-
-def parse_subregions_taskrunner(
-    fileName: str,
-    single_core_assignment: dict,
-) -> None:
-    for window,subregions in single_core_assignment:
-        window_bam = pysam.AlignmentFile(fileName,'rb',check_sq=True)
-        for subregion in subregions:
-            parse_subregion(subregion)
-            
-def parse_subregion(
-    subregion,
-):
-    x=1
-    # Calls the read by basemod parser for each read in the subregion
-    # Pulls in the readwise info and completes the pileup operation
-    # Saves to appropriate formats as a batch, writing to its own file
+            print(f'read pos {read.pos}')        
 
 def explore_bam(
     fileName: str,

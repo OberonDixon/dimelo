@@ -20,3 +20,4 @@ from .plot_browser import plot_browser
 from .plot_enrichment import plot_enrichment
 from .plot_enrichment_profile import plot_enrichment_profile
 from .qc import qc_report
+from .utils.genome_regions import ProcesswiseTaskBuilder, Region

@@ -24,7 +24,7 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 
 from dimelo.parse_bam import make_db
-from dimelo.utils import execute_sql_command
+from dimelo.utils.db_utils import execute_sql_command
 
 DEFAULT_COLOR_LIST = [
     "#BB4430",
