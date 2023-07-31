@@ -96,6 +96,7 @@ def parse_read_by_basemod(
     forward_sequence = read.get_forward_sequence()
     if forward_sequence is not None:
         valid_indices = range(0,len(read.get_forward_sequence()))
+        read_indices = range(0,len(read.get_forward_sequence()))
         if basemod_key is not None:               
             if threshold>0:
                 modified_indices = [coord_prob_tuple[0] for coord_prob_tuple 
@@ -108,6 +109,7 @@ def parse_read_by_basemod(
     else:
         valid_indices = []
         modified_indices = []
+        read_indices = []
     ########################################################################################
     # Load up and process the read sequence for later comparisons, if needed
     ########################################################################################
@@ -142,7 +144,7 @@ def parse_read_by_basemod(
     # return None for insertions
     valid_indices = [index for index in valid_indices if reference_positions[index] is not None]
     modified_indices = [index for index in modified_indices if reference_positions[index] is not None]
-#         print('start-end',read_start,read_end)
+    read_indices = [index for index in read_indices if reference_positions[index] is not None]
 
     ########################################################################################
     # Load up the reference genome segment if needed
@@ -262,10 +264,19 @@ def parse_read_by_basemod(
     ######################################################################################## 
 
     reference_coordinates = np.arange(read_start,read_end)
+    
+    # Positions where the read aligns, so we can get read depth
+    read_coordinates = np.zeros(read_end-read_start)
+    if len(read_indices)>0:
+        read_coordinates[np.array(reference_positions_rel)[np.array(read_indices)].astype(int)] = 1
+    
+    # Positions where the context is valid for a base modification, so we can get pileup denominator
     valid_coordinates = np.zeros(read_end-read_start)
-
     if len(valid_indices)>0:
         valid_coordinates[np.array(reference_positions_rel)[np.array(valid_indices)].astype(int)] = 1
+    
+    # Positions where the base-in-context was actually modified, so we can get pileup numerator. 
+    # Report the actual prob if threshold was zero
     modified_coordinates = np.zeros(read_end-read_start)
     if len(modified_indices)>0:
         if threshold>0:
@@ -276,8 +287,18 @@ def parse_read_by_basemod(
             filtered_indices,filtered_values = zip(*filtered_modified_bases_tuples)
             modified_coordinates[np.array(reference_positions_rel)
                                  [np.array(filtered_indices)].astype(int)] = filtered_values/255
-
-    return (reference_coordinates,valid_coordinates,modified_coordinates,ref_seq)
+    
+    # Index the read sequences to report back aligned with the valid and modified coordinates
+    read_seq_aligned = "".join([read_seq[index] for index in range(len(read_seq)) 
+                                if reference_positions[index] is not None])
+    
+    return (reference_coordinates,
+            read_coordinates,
+            valid_coordinates,
+            modified_coordinates,
+            ref_seq,
+            read_seq_aligned,
+           )
 
 def resolve_basemod_ambiguities(
     basemods,

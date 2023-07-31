@@ -18,6 +18,7 @@ import json
 from typing import Tuple
 import sqlite3
 from typing import List, Tuple
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -28,10 +29,10 @@ from Bio.Seq import Seq
 
 from dimelo.utils.db_utils import clear_db, create_sql_table, execute_sql_command
 from dimelo.utils import file_saver, read_parser
-from dimelo.utils.genome_regions import Region, ProcesswiseTaskBuilder, SingleProcessTasks, SubregionTask
+from dimelo.utils.genome_regions import Region, ProcesswiseTaskBuilder, SingleProcessTasks, SubregionTask, SubregionData
 
 DEFAULT_BASEMOD = "A+CG"
-DEFAULT_BASEMODS = ('N:A+m:N','N:C+m:G')
+DEFAULT_BASEMODS = ('mA','CpG')
 DEFAULT_THRESH_A = 129
 DEFAULT_THRESH_C = 129
 DEFAULT_WINDOW_SIZE = 1000
@@ -127,6 +128,7 @@ def parse_bam(
     referenceGenome: str = None,
     cores: int=None,
     memory: int=None,
+    formats_list: list=['bigwig'],
 ) -> (dict,dict):
 
     ########################################################################################
@@ -165,6 +167,9 @@ def parse_bam(
     
     if not os.path.isdir(outDir):
         os.makedirs(outDir)
+        
+    if not os.path.isdir(outDir+"/temp"):
+        os.makedirs(outDir+"/temp")
 
     # make_db(fileName, sampleName, outDir)
 
@@ -196,13 +201,16 @@ def parse_bam(
     processwise_tasks = ProcesswiseTaskBuilder(
         regions,
         fileName,
+        formats_list,
         num_cores,
-        5000000000,
+        memory,        
     )
         
     Parallel(n_jobs=num_cores)(
         delayed(run_single_process)(
             tasks,
+            fileName,
+            outDir,
             basemods,
             context_check_source,
             checkAgainstRef,
@@ -212,6 +220,16 @@ def parse_bam(
         )
         for tasks in processwise_tasks.core_assignments.values()
     )
+    
+    file_saver.merge_temp_files(
+        processwise_tasks,
+        sampleName,
+        outDir,
+        outDir+'/temp',
+        basemods,
+    )
+    
+#     shutil.rmtree(outDir+'/temp')
     
 #     for tasks in processwise_tasks.core_assignments.values():
 #         run_single_process(
@@ -301,6 +319,8 @@ def parse_bam(
 
 def run_single_process(
     process_tasklist: SingleProcessTasks,
+    fileName,
+    outDir,
     basemods,
     context_check_source,
     checkAgainstRef,
@@ -317,6 +337,8 @@ def run_single_process(
         for subregion in subregion_list:
             parse_subregion(
                 region_string,
+                fileName,
+                outDir,
                 subregion,
                 basemods,
                 context_check_source,
@@ -328,7 +350,9 @@ def run_single_process(
             
 def parse_subregion(
     region_string: str,
-    subregion: SubregionTask,
+    fileName,
+    outDir,
+    subregion_task: SubregionTask,
     basemods,
     context_check_source,
     checkAgainstRef,
@@ -339,22 +363,38 @@ def parse_subregion(
     # Calls the read by basemod parser for each read in the subregion
     # Pulls in the readwise info and completes the pileup operation
     # Saves to appropriate formats as a batch, writing to its own file
-    bam = pysam.AlignmentFile(subregion.bam_file,"rb",check_sq=True)
-    # Create pileup files
-    modified_pile_dict = {}
-    valid_pile_dict = {}
-    pile_coordinates = np.arange(subregion.begin,subregion.end)
-    print(min(pile_coordinates),max(pile_coordinates))
-    for basemod_identifier in basemods:
-        modified_pile_dict[basemod_identifier] = np.zeros(subregion.end-subregion.begin)
-        valid_pile_dict[basemod_identifier] = np.zeros(subregion.end-subregion.begin)
+    bam = pysam.AlignmentFile(subregion_task.bam_file,"rb",check_sq=True)
+    
+    # Create SubregionData object
+    subregion_data = SubregionData(subregion_task,basemods)
+    
+#     # Create single reads dict
+#     reads_dict = {}
+#     # Create pileup files
+#     pileups_dict = {
+    
+#     }
+#     modified_pile_dict = {}
+#     valid_pile_dict = {}
+#     read_depth = np.zeros(subregion.end-subregion.begin)
+#     pile_coordinates = np.arange(subregion.begin,subregion.end)
+#     print(min(pile_coordinates),max(pile_coordinates))
+#     for basemod_identifier in basemods:
+#         modified_pile_dict[basemod_identifier] = np.zeros(subregion.end-subregion.begin)
+#         valid_pile_dict[basemod_identifier] = np.zeros(subregion.end-subregion.begin)
     # Iterate through reads
-    for read in bam.fetch(subregion.chromosome,subregion.begin,subregion.end):
+    for read in bam.fetch(subregion_task.chromosome,subregion_task.begin,subregion_task.end):
         valid_coordinates_list = []
         modified_coordinates_list = []
 
         for basemod_identifier in basemods:
-            reference_coordinates,valid_coordinates,modified_coordinates,ref_seq = read_parser.parse_read_by_basemod(
+            (reference_coordinates,
+             read_coordinates,
+             valid_coordinates,
+             modified_coordinates,
+             ref_seq,
+             read_seq_aligned
+            ) = read_parser.parse_read_by_basemod(
                 read=read,
                 basemod_identifier=basemod_identifier,
                 context_check_source=context_check_source,
@@ -371,20 +411,60 @@ def parse_subregion(
             basemods,
             valid_coordinates_list,
             modified_coordinates_list
-        )        
+        )
         
-        # create masks for valid reference_coordinates
-        valid_mask = (reference_coordinates >= pile_coordinates[0]) & (reference_coordinates <= pile_coordinates[-1])
-        read_indices = np.searchsorted(pile_coordinates,reference_coordinates[valid_mask])
+        subregion_data.add_read(
+            read_name=read.query_name,
+            read_chr=read.reference_name,
+            read_pos=read.pos,
+            ref_seq=ref_seq,
+            read_seq_aligned=read_seq_aligned,
+            reference_coordinates=reference_coordinates,
+            read_coordinates=read_coordinates,
+            valid_coordinates_list_disambiguated=valid_coordinates_list_disambiguated,
+            modified_coordinates_list_disambiguated=modified_coordinates_list_disambiguated,
+        )
         
-        for basemod_index,basemod_identifier in enumerate(basemods):
-            modified_pile_dict[basemod_identifier][read_indices]+=(modified_coordinates_list_disambiguated
-                                                                   [basemod_index][valid_mask])
-            valid_pile_dict[basemod_identifier][read_indices]+=(valid_coordinates_list_disambiguated
-                                                                [basemod_index][valid_mask])
+#         # We don't save the read if it starts before the subregion and this subregion is not the first
+#         # in the region as a whole, because that read will have been saved in the first subregion already
+#         if subregion.intraregion_position not in ['internal','last'] or read.pos>=subregion.begin:
+#             current_read_dict = {
+#                 'read_name':read.query_name,
+#                 'chr':subregion.chromosome,
+#                 'pos':read.pos,
+#                 'ref_seq':ref_seq,
+#                 'read_seq_aligned':read_seq_aligned,
+#                 'read_coordinates':read_coordinates,
+#                 'reference_coordinates':reference_coordinates,
+#                 **{basemod_identifier:{} for basemod_identifier in basemods},
+#             }
+#             for basemod_index,basemod_identifier in enumerate(basemods):
+#                 current_read_dict[basemod_identifier]['valid_coordinates'] = valid_coordinates_list_disambiguated[basemod_index]
+#                 current_read_dict[basemod_identifier]['modified_coordinates'] = modified_coordinates_list_disambiguated[basemod_index]
+                
+#             reads_dict[read.query_name] = current_read_dict
+                        
+
         
-        if read.pos%500==0:
-            print(f'read pos {read.pos}')        
+#         # create masks for valid reference_coordinates
+#         valid_mask = (reference_coordinates >= pile_coordinates[0]) & (reference_coordinates <= pile_coordinates[-1])
+#         read_indices = np.searchsorted(pile_coordinates,reference_coordinates[valid_mask])
+        
+#         read_depth[read_indices]+=read_coordinates[valid_mask]
+        
+#         for basemod_index,basemod_identifier in enumerate(basemods):
+#             modified_pile_dict[basemod_identifier][read_indices]+=(modified_coordinates_list_disambiguated
+#                                                                    [basemod_index][valid_mask])
+#             valid_pile_dict[basemod_identifier][read_indices]+=(valid_coordinates_list_disambiguated
+#                                                                 [basemod_index][valid_mask])
+        
+#         if read.pos%500==0:
+#             print(f'read pos {read.pos}')   
+            
+    file_saver.subregion_save_all(
+        subregion_data=subregion_data,
+        outDir_temp=outDir+"/temp"
+    )
 
 def explore_bam(
     fileName: str,

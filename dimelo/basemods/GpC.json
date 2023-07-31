@@ -1,5 +1,5 @@
 {
-    "identifier":"G:C+m:N",
+    "identifier":"GpC",
     "description":"5-Methylcytosine preceded by guanine",
     "upstream_context":[["G"]],
     "downstream_context":[["A","T","C","G"]],

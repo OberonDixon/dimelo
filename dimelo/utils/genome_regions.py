@@ -2,6 +2,8 @@ import pandas as pd
 from typing import List, Union
 import pysam
 from collections import defaultdict
+import numpy as np
+import pandas as pd
 
 class Region(object):
     def __init__(self, region: Union[str, pd.Series]):
@@ -68,6 +70,7 @@ class SubregionTask(Region):
         region: Union[str, pd.Series, Region], 
         intraregion_position: str,
         task_bases:int,
+        formats_list: list,
     ):
         if isinstance(region,str) or isinstance(region,pd.Series):
             super().__init__(region)
@@ -86,11 +89,79 @@ class SubregionTask(Region):
         self.intraregion_position = intraregion_position
         self.bam_file = fileName
         self.task_bases = task_bases
+        self.formats_list = formats_list
+
+class SubregionData(SubregionTask):
+    def __init__(
+        self,
+        subregion_task: SubregionTask,
+        basemods: list,
+    ):
+        
+        self.__dict__.update(vars(subregion_task))
+        self.basemods = basemods
+        
+        self.read_depth = np.zeros(self.end-self.begin)
+        
+        self.modified_pile_dict = {}
+        self.valid_pile_dict = {}
+        self.pile_coordinates = np.arange(self.begin,self.end)
+        
+        for basemod_identifier in basemods:
+            self.modified_pile_dict[basemod_identifier] = np.zeros(self.end-self.begin)
+            self.valid_pile_dict[basemod_identifier] = np.zeros(self.end-self.begin)
+        
+        self.read_lists_dict = defaultdict(list)
+            
+    def add_read(
+        self,
+        read_name,
+        read_chr,
+        read_pos,
+        ref_seq,
+        read_seq_aligned,
+        reference_coordinates,
+        read_coordinates,
+        valid_coordinates_list_disambiguated,
+        modified_coordinates_list_disambiguated,
+    ):
+        # Process individual read for reads dict
+#         if self.intraregion_position in ['internal','last'] and read_pos<self.begin:
+#             # This read has already been saved, skip it
+#             pass
+#         else:
+#             self.read_lists_dict['read_name'].append(read_name)
+#             self.read_lists_dict['chr'].append(read_chr)
+#             self.read_lists_dict['pos'].append(read_pos)
+#             self.read_lists_dict['ref_seq'].append(ref_seq)
+#             self.read_lists_dict['read_seq_aligned'].append(read_seq_aligned)
+#             self.read_lists_dict['read_coordinates'].append(read_coordinates)
+#             self.read_lists_dict['reference_coordinates'].append(
+#                 reference_coordinates)
+            
+#             for basemod_index,basemod_identifier in enumerate(self.basemods):
+#                 self.read_lists_dict[f'val{basemod_identifier}'].append(
+#                     valid_coordinates_list_disambiguated[basemod_index])
+#                 self.read_lists_dict[f'mod{basemod_identifier}'].append(
+#                     modified_coordinates_list_disambiguated[basemod_index])
+        
+        # Perform pileup operation
+        # create masks for valid reference_coordinates
+        valid_mask = (reference_coordinates >= self.pile_coordinates[0]) & (reference_coordinates <= self.pile_coordinates[-1])
+        read_indices = np.searchsorted(self.pile_coordinates,reference_coordinates[valid_mask])
+        
+        self.read_depth[read_indices]+=read_coordinates[valid_mask]
+        for basemod_index,basemod_identifier in enumerate(self.basemods):
+            self.modified_pile_dict[basemod_identifier][read_indices]+=(modified_coordinates_list_disambiguated
+                                                                   [basemod_index][valid_mask])
+            self.valid_pile_dict[basemod_identifier][read_indices]+=(valid_coordinates_list_disambiguated
+                                                                [basemod_index][valid_mask])
 
 class SingleProcessTasks:
     def __init__(
         self,
         process_id: int,
+        formats_list: list,
     ):
         self.process_id = process_id
         self.tasks = defaultdict(list)
@@ -107,16 +178,21 @@ class ProcesswiseTaskBuilder:
         self, 
         region_list: List[Region], 
         fileName: str,
+        formats_list: list,
         num_cores: int, 
         mem_allowance: int,
     ):
         self.region_list = region_list
+        self.formats_list = formats_list
+        
+        self.chr_ranges = {}
  
         self.construct_loadbalanced_tasks(
             fileName=fileName,
             num_cores=num_cores,
-            batch_num_bases=mem_allowance/16
+            batch_num_bases=mem_allowance/num_cores
         )
+    
     def construct_loadbalanced_tasks(
         self, 
         fileName: str,
@@ -131,6 +207,10 @@ class ProcesswiseTaskBuilder:
         regionwise_read_lengths = {}
         
         for region in self.region_list:
+            if region.chromosome not in self.chr_ranges:
+                self.chr_ranges[region.chromosome]=region.end
+            elif self.chr_ranges[region.chromosome]<region.end:
+                self.chr_ranges[region.chromosome]=region.end
             positions = []
             readlens = []
             for read in bam.fetch(reference=region.chromosome,start=region.begin,end=region.end):
@@ -145,9 +225,9 @@ class ProcesswiseTaskBuilder:
         # Build single process task lists
         self.core_assignments = {}
         core_index = 0
-        self.core_assignments[core_index] = SingleProcessTasks(core_index)
+        self.core_assignments[core_index] = SingleProcessTasks(core_index,self.formats_list)
                 
-        # We will add reads to a batch until we reach this value, then split to a new subregion
+        # We will add reads to a batch until we reach batch_num_bases, then split to a new subregion
         bases_in_batch = 0
         # We will add subregions to a core until we reach this value, then go to the next core
         bases_assigned_to_core = 0
@@ -171,9 +251,11 @@ class ProcesswiseTaskBuilder:
                             pd.Series([region.chromosome,subregion_start,subregion_end]),
                             type_label,
                             bases_in_batch,
+                            self.formats_list,
                         )
                     )
                     subregion_start = position
+                    print('bases in batch',bases_in_batch)
                     bases_in_batch = 0
                 # If we have exceeded the per-core approximate limit, define a new subregion and a new
                 # SingleProcessTasks entry
@@ -186,11 +268,13 @@ class ProcesswiseTaskBuilder:
                             pd.Series([region.chromosome,subregion_start,subregion_end]),
                             type_label,
                             bases_in_batch,
+                            self.formats_list,
                         )
                     )
                     subregion_start = position
                     core_index += 1
-                    self.core_assignments[core_index] = SingleProcessTasks(core_index)
+                    self.core_assignments[core_index] = SingleProcessTasks(core_index,self.formats_list)
+                    print('bases in batch',bases_in_batch)
                     bases_assigned_to_core = 0
                     bases_in_batch = 0
                     # All subregions after the first per window are 'internal', meaning reads
@@ -217,7 +301,9 @@ class ProcesswiseTaskBuilder:
                         pd.Series([region.chromosome,subregion_start,region.end]),
                         type_label,
                         bases_in_batch,
+                        self.formats_list,
                     )
                 )
+                print('bases in batch',bases_in_batch)
         
         

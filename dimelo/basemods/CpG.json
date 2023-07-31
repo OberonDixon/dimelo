@@ -1,5 +1,5 @@
 {
-    "identifier":"N:C+m:G",
+    "identifier":"CpG",
     "description":"5-Methylcytosine followed by guanine",
     "upstream_context":[["A","T","C","G"]],
     "downstream_context":[["G"]],

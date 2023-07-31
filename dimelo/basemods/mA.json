@@ -1,5 +1,5 @@
 {
-    "identifier":"N:A+m:N",
+    "identifier":"mA",
     "description":"N6-Methyladenine any context",
     "upstream_context":[["A","T","C","G"]],
     "downstream_context":[["A","T","C","G"]],
