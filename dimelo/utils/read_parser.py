@@ -92,21 +92,49 @@ def parse_read_by_basemod(
     # Extract indices for modified bases that meet the threshold to be counted
     ########################################################################################
     # These indices tell us where, relative to the start of the read, we can find bases
-    # that have been modified
+    # that have been modified. Everything stays in read coordinates until the end, when we
+    # must convert to reference coordinates to facilitate the pileup operation and read-to-read
+    # comparisons in a unified coordinate system
+    # Read and reference coordinates differ by the cigar tuples describing the alignment,
+    # there may be missing or extra bases in the read. Parts of the read may not align anywhere.
+    # Implicit in the read parser as of now is the assumption that anything outside the reference
+    # coordinate system is spurious information. That is not necessarily true! But you can't do a pileup
+    # and create a DiMeLo seq genomic track without that assumption.
     forward_sequence = read.get_forward_sequence()
     if forward_sequence is not None:
-        valid_indices = range(0,len(read.get_forward_sequence()))
+        # The read exists at all coordinates in the read coordinate system 
+        # (which will map to some set of reference genome coordinates)
         read_indices = range(0,len(read.get_forward_sequence()))
-        if basemod_key is not None:               
+        if basemod_key is not None: 
+            # To start with, an index is only valid for modification if it has the right base in the read
+            if read.is_forward:
+                # In the forward read case, this is super simple
+                valid_indices = [index for index in range(0,len(forward_sequence)) 
+                                 if forward_sequence[index].upper() == config['modified_base']]
+            else:
+                # In the forward read case we just check against read coordinates end-to-start
+                valid_indices = [index for index in range(0,len(forward_sequence))
+                                 if forward_sequence[-index-1].upper() == config['modified_base']]
+            # Modifications are provided in the read.modified_bases dict of lists of tuples,
+            # where the tuples contain (coordinate,mod_prob)
             if threshold>0:
+                # If we are asking for a particular modification threshold, then indices are either
+                # modified (>=threshold) or not modified
                 modified_indices = [coord_prob_tuple[0] for coord_prob_tuple 
                                     in modified_bases[basemod_key] if coord_prob_tuple[1]>=threshold]
             else:
+                # If we are not specifying a threshold, that means anything in the list of tuples should be
+                # recorded, although some of them may have mod_prob zero and thus will end up being the same
+                # in the final array as a coordinate that was in fact not in the list
                 modified_indices = [coord_prob_tuple[0] for coord_prob_tuple 
                                     in modified_bases[basemod_key]]
         else:
+            # This case exists so invalid basemods don't crash the program
+            valid_indices = []
             modified_indices = []
     else:
+        # Sometimes there isn't a forward sequence recorded. In this case we really can't do anything
+        # with the read, the rest of the list comprehensions will basically do nothing
         valid_indices = []
         modified_indices = []
         read_indices = []
