@@ -138,6 +138,7 @@ def parse_read_by_basemod(
         valid_indices = []
         modified_indices = []
         read_indices = []
+        
     ########################################################################################
     # Load up and process the read sequence for later comparisons, if needed
     ########################################################################################
@@ -146,12 +147,8 @@ def parse_read_by_basemod(
             read_seq = read.query_sequence
         else:
             read_seq = str(Seq(read.query_sequence).complement())
-#             print('read:',read_seq[0:10])
     else:
         read_seq = None
-
-
-#         print('is_forward:',read.is_forward)
 
 
 
@@ -188,20 +185,13 @@ def parse_read_by_basemod(
     else:
         ref_seq = None
 
-#         if ref_seq is not None:
-#             print('ref:',ref_seq[0:10])
-
     ########################################################################################
     # Adjust indices to remove basemods that whose basecall doesn't match the reference
     ########################################################################################
     # If validate_with_reference is True, the index of bases that don't line up with the reference
     # is not counted as "modified" or "unmodified" it is simply removed from the list entirely
-    modified_unvalidated_count = len(modified_indices)
-    all_unvalidated_count = len(valid_indices)
 
     if validate_with_reference:
-#             for index in valid_indices[1:-2]:
-#                 print(basemod,ref_seq(reference_positions_rel[index-1:index+1]))
         modified_indices = [index for index in modified_indices 
                             if reference_positions_rel[index]<len(ref_seq) 
                             and ref_seq[reference_positions_rel[index]]
@@ -210,12 +200,6 @@ def parse_read_by_basemod(
                          if reference_positions_rel[index]<len(ref_seq) 
                          and ref_seq[reference_positions_rel[index]]
                              .upper()==config['modified_base']]
-
-    modified_validated_count = len(modified_indices)
-    all_validated_count = len(valid_indices)
-#         print('validate?',validate_with_reference)
-#         if validate_with_reference:
-#             print('fraction that check out with reference',modified_validated_count/modified_unvalidated_count)
 
     ########################################################################################
     # Check upstream context
@@ -284,9 +268,6 @@ def parse_read_by_basemod(
                                  if 0<index+distance<len(read_seq) 
                                  and read_seq[index+distance] in bases]  
 
-    modified_contextualized_count = len(modified_indices)
-    all_contextualized_count = len(valid_indices)
-
     ########################################################################################
     # Build output arrays
     ######################################################################################## 
@@ -317,8 +298,12 @@ def parse_read_by_basemod(
                                  [np.array(filtered_indices)].astype(int)] = filtered_values/255
     
     # Index the read sequences to report back aligned with the valid and modified coordinates
-    read_seq_aligned = "".join([read_seq[index] for index in range(len(read_seq)) 
-                                if reference_positions[index] is not None])
+    indexed_reference_positions_rel = [(index,value) for index,value in enumerate(reference_positions_rel)]
+    read_seq_aligned_list = ["-" for pos in range(read_end-read_start)]
+    for read_index,reference_position in indexed_reference_positions_rel:
+        if reference_position is not None:
+            read_seq_aligned_list[reference_position]=read_seq[read_index]
+    read_seq_aligned = "".join(read_seq_aligned_list)
     
     return (reference_coordinates,
             read_coordinates,
