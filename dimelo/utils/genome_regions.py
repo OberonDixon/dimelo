@@ -4,6 +4,8 @@ import pysam
 from collections import defaultdict
 import numpy as np
 import pandas as pd
+import sys
+from pympler import asizeof
 
 class Region(object):
     def __init__(self, region: Union[str, pd.Series]):
@@ -118,6 +120,7 @@ class SubregionData(SubregionTask):
         read_name,
         read_chr,
         read_pos,
+        read_is_forward,
         ref_seq,
         read_seq_aligned,
         reference_coordinates,
@@ -126,24 +129,37 @@ class SubregionData(SubregionTask):
         modified_coordinates_list_disambiguated,
     ):
         # Process individual read for reads dict
-#         if self.intraregion_position in ['internal','last'] and read_pos<self.begin:
-#             # This read has already been saved, skip it
-#             pass
-#         else:
-#             self.read_lists_dict['read_name'].append(read_name)
-#             self.read_lists_dict['chr'].append(read_chr)
-#             self.read_lists_dict['pos'].append(read_pos)
-#             self.read_lists_dict['ref_seq'].append(ref_seq)
-#             self.read_lists_dict['read_seq_aligned'].append(read_seq_aligned)
-#             self.read_lists_dict['read_coordinates'].append(read_coordinates)
-#             self.read_lists_dict['reference_coordinates'].append(
-#                 reference_coordinates)
+        if self.intraregion_position in ['internal','last'] and read_pos<self.begin:
+            # This read has already been saved, skip it
+            pass
+        else:
+            self.read_lists_dict['read_name'].append(read_name)
+            self.read_lists_dict['chr'].append(read_chr)
+            self.read_lists_dict['pos'].append(read_pos)
+            self.read_lists_dict['is_forward'].append(read_is_forward)
+            self.read_lists_dict['ref_seq'].append(ref_seq)
+            self.read_lists_dict['read_seq_aligned'].append(read_seq_aligned)
+            self.read_lists_dict['read_coordinates'].append(read_coordinates)
+            self.read_lists_dict['reference_coordinates'].append(
+                reference_coordinates)
             
-#             for basemod_index,basemod_identifier in enumerate(self.basemods):
-#                 self.read_lists_dict[f'val{basemod_identifier}'].append(
-#                     valid_coordinates_list_disambiguated[basemod_index])
-#                 self.read_lists_dict[f'mod{basemod_identifier}'].append(
-#                     modified_coordinates_list_disambiguated[basemod_index])
+            for basemod_index,basemod_identifier in enumerate(self.basemods):
+                self.read_lists_dict[f'val{basemod_identifier}'].append(
+                    valid_coordinates_list_disambiguated[basemod_index])
+                self.read_lists_dict[f'mod{basemod_identifier}'].append(
+                    modified_coordinates_list_disambiguated[basemod_index])
+                
+#             if self.end - read_pos < 1000:
+#                 read_lists_dict_size = 0
+#                 for key,value in self.read_lists_dict.items():
+#                     key_size = asizeof.asizeof(value)
+#                     if type(value[0])==np.ndarray:
+#                         print(key,key_size,'type:',value[0].dtype,len(value),'elements, last one ',len(value[-1]),'slong')
+#                     else:
+#                         print(key,key_size,'type:',type(value[0]))
+#                     read_lists_dict_size+=key_size
+
+#                 print('reads memory usage:',read_lists_dict_size)
         
         # Perform pileup operation
         # create masks for valid reference_coordinates
@@ -184,19 +200,18 @@ class ProcesswiseTaskBuilder:
     ):
         self.region_list = region_list
         self.formats_list = formats_list
+        self.num_cores = num_cores
         
         self.chr_ranges = {}
  
         self.construct_loadbalanced_tasks(
             fileName=fileName,
-            num_cores=num_cores,
             batch_num_bases=mem_allowance/num_cores
         )
     
     def construct_loadbalanced_tasks(
         self, 
         fileName: str,
-        num_cores: int,
         batch_num_bases: int,
     ):     
         # Map out read across regions
@@ -220,7 +235,7 @@ class ProcesswiseTaskBuilder:
             regionwise_read_lengths[region]=readlens
             
         total_read_bases = sum([sum(readlens) for readlens in regionwise_read_lengths.values()])
-        approx_bases_per_core = (total_read_bases//num_cores)+1
+        approx_bases_per_core = (total_read_bases//self.num_cores)+1
         
         # Build single process task lists
         self.core_assignments = {}

@@ -19,6 +19,7 @@ from typing import Tuple
 import sqlite3
 from typing import List, Tuple
 import shutil
+import time
 
 import numpy as np
 import pandas as pd
@@ -189,6 +190,8 @@ def parse_bam(
     # Create task list and run parallel processes
     ########################################################################################    
     # default number of cores is max available
+    start_tasklist = time.time()
+    
     cores_avail = multiprocessing.cpu_count()
     if cores is None:
         num_cores = cores_avail
@@ -205,6 +208,9 @@ def parse_bam(
         num_cores,
         memory,        
     )
+    
+    start_parallel = time.time()
+    print('Starting up parallel processes, tasklist took',start_parallel-start_tasklist)
         
     Parallel(n_jobs=num_cores)(
         delayed(run_single_process)(
@@ -221,6 +227,9 @@ def parse_bam(
         for tasks in processwise_tasks.core_assignments.values()
     )
     
+    start_merge = time.time()
+    print('Starting merge, parallel processing took',start_merge-start_parallel)
+    
     file_saver.merge_temp_files(
         processwise_tasks,
         sampleName,
@@ -229,7 +238,9 @@ def parse_bam(
         basemods,
     )
     
-#     shutil.rmtree(outDir+'/temp')
+    shutil.rmtree(outDir+'/temp')
+    end_merge = time.time()
+    print('Merge took',end_merge-start_merge)
     
 #     for tasks in processwise_tasks.core_assignments.values():
 #         run_single_process(
@@ -417,6 +428,7 @@ def parse_subregion(
             read_name=read.query_name,
             read_chr=read.reference_name,
             read_pos=read.pos,
+            read_is_forward=read.is_forward,
             ref_seq=ref_seq,
             read_seq_aligned=read_seq_aligned,
             reference_coordinates=reference_coordinates,
