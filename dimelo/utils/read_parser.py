@@ -142,13 +142,13 @@ def parse_read_by_basemod(
     ########################################################################################
     # Load up and process the read sequence for later comparisons, if needed
     ########################################################################################
-    if context_check_source in ('read','both'):
-        if read.is_forward:
-            read_seq = read.query_sequence
-        else:
-            read_seq = str(Seq(read.query_sequence).complement())
+    if read.is_forward:
+        read_seq = read.query_sequence
     else:
-        read_seq = None
+        if type(read.query_sequence) is str:
+            read_seq = str(Seq(read.query_sequence).complement())
+        else:
+            read_seq = None
 
 
 
@@ -301,7 +301,7 @@ def parse_read_by_basemod(
     indexed_reference_positions_rel = [(index,value) for index,value in enumerate(reference_positions_rel)]
     read_seq_aligned_list = ["-" for pos in range(read_end-read_start)]
     for read_index,reference_position in indexed_reference_positions_rel:
-        if reference_position is not None:
+        if reference_position is not None and read_seq is not None:
             read_seq_aligned_list[reference_position]=read_seq[read_index]
     read_seq_aligned = "".join(read_seq_aligned_list)
     
