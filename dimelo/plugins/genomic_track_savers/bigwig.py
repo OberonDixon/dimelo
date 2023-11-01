@@ -2,6 +2,7 @@ import pyBigWig
 from dimelo.utils.file_saver import SubregionData,ProcesswiseTaskBuilder
 import numpy as np
 import time
+from multiprocessing import Pool
 
 def save_subregion_batch(
     subregion_data: SubregionData,
