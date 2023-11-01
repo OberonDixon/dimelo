@@ -295,7 +295,7 @@ def parse_read_by_basemod(
             filtered_modified_bases_tuples = [t for t in modified_bases[basemod_key] if t[0] in modified_indices_set]
             filtered_indices,filtered_values = zip(*filtered_modified_bases_tuples)
             modified_coordinates[np.array(reference_positions_rel)
-                                 [np.array(filtered_indices)].astype(int)] = filtered_values/255
+                                 [np.array(list(filtered_indices))].astype(int)] = np.array(list(filtered_values))/255
     
     # Index the read sequences to report back aligned with the valid and modified coordinates
     indexed_reference_positions_rel = [(index,value) for index,value in enumerate(reference_positions_rel)]
