@@ -103,6 +103,9 @@ class SubregionData(SubregionTask):
         self.__dict__.update(vars(subregion_task))
         self.basemods = basemods
         
+        if self.begin>=self.end:
+            print('begin:end:',self.begin,self.end)
+        
         self.read_depth = np.zeros(self.end-self.begin)
         
         self.modified_pile_dict = {}
@@ -258,7 +261,9 @@ class ProcesswiseTaskBuilder:
             for position,readlen in zip(positions,readlens):
                 # If we have exceeded the batch size, define a new subregion
                 if bases_in_batch > batch_num_bases:
-                    subregion_end = position-1
+                    subregion_end = max(subregion_start+1,position-1)
+                    if(subregion_start+1>position-1):
+                        print(f'Warning: too little memory, batch {bases_in_batch} at {region.chromosome} hit limit {batch_num_bases} for core {core_index}')
                     self.core_assignments[core_index].add_task(
                         region,
                         SubregionTask(
@@ -270,26 +275,29 @@ class ProcesswiseTaskBuilder:
                         )
                     )
                     subregion_start = position
-                    print('bases in batch',bases_in_batch)
+                    print('bases in batch (batch size exceeded)',bases_in_batch)
                     bases_in_batch = 0
                 # If we have exceeded the per-core approximate limit, define a new subregion and a new
                 # SingleProcessTasks entry
-                if bases_assigned_to_core > approx_bases_per_core:
-                    subregion_end = position-1
-                    self.core_assignments[core_index].add_task(
-                        region,
-                        SubregionTask(
-                            fileName,
-                            pd.Series([region.chromosome,subregion_start,subregion_end]),
-                            type_label,
-                            bases_in_batch,
-                            self.formats_list,
+                if bases_assigned_to_core > approx_bases_per_core and position!=last_position:
+                    subregion_end = max(subregion_start,position-1)
+                    if(subregion_start+1>position-1):
+                        print(f'Warning: end of allotment mismatch, batch {bases_in_batch} at {region.chromosome} start {subregion_start} end {position-1}')
+                    if bases_in_batch>0:
+                        self.core_assignments[core_index].add_task(
+                            region,
+                            SubregionTask(
+                                fileName,
+                                pd.Series([region.chromosome,subregion_start,subregion_end]),
+                                type_label,
+                                bases_in_batch,
+                                self.formats_list,
+                            )
                         )
-                    )
                     subregion_start = position
                     core_index += 1
                     self.core_assignments[core_index] = SingleProcessTasks(core_index,self.formats_list)
-                    print('bases in batch',bases_in_batch)
+                    print('bases in batch (core allotment reached)',bases_in_batch)
                     bases_assigned_to_core = 0
                     bases_in_batch = 0
                     # All subregions after the first per window are 'internal', meaning reads
@@ -301,6 +309,7 @@ class ProcesswiseTaskBuilder:
                 # much to all the cores except the last, which is ok)
                 bases_assigned_to_core += readlen
                 bases_in_batch += readlen
+                last_position = position
             if subregion_start < region.end:
                 if subregion_start == region.begin:
                     # If a window is not split at all into different subregions, its reads get
@@ -309,16 +318,17 @@ class ProcesswiseTaskBuilder:
                 else:
                     # The last subregion of a region has reads it saves truncated at the end
                     type_label = 'last'
-                self.core_assignments[core_index].add_task(
-                    region,
-                    SubregionTask(
-                        fileName,
-                        pd.Series([region.chromosome,subregion_start,region.end]),
-                        type_label,
-                        bases_in_batch,
-                        self.formats_list,
+                if bases_in_batch>0:
+                    self.core_assignments[core_index].add_task(
+                        region,
+                        SubregionTask(
+                            fileName,
+                            pd.Series([region.chromosome,subregion_start,region.end]),
+                            type_label,
+                            bases_in_batch,
+                            self.formats_list,
+                        )
                     )
-                )
-                print('bases in batch',bases_in_batch)
+                print(f'bases in batch ({type_label} for core)',bases_in_batch)
         
         
