@@ -210,37 +210,57 @@ def parse_bam(
     )
     
     start_parallel = time.time()
-    print('Starting up parallel processes, tasklist took',start_parallel-start_tasklist)
-    try:    
-        Parallel(n_jobs=num_cores)(
-            delayed(run_single_process)(
-                tasks,
-                fileName,
-                outDir,
-                basemods,
-                context_check_source,
-                checkAgainstRef,
-                referenceGenome,
-                pipeline,
-                thresholds            
-            )
-            for tasks in processwise_tasks.core_assignments.values()
+    print('Starting up parallel processes, tasklist took',start_parallel-start_tasklist,flush=True)
+    
+    tasks_list = [
+        (
+            tasks,
+            fileName,
+            outDir,
+            basemods,
+            context_check_source,
+            checkAgainstRef,
+            referenceGenome,
+            pipeline,
+            thresholds
         )
-    except Exception as e:
-        print('Error in parallel processing:',e)
-    print('Before merge timer')
+        for tasks in processwise_tasks.core_assignments.values()
+    ]
+#     print('assembled tasks',flush=True)
+    with multiprocessing.Pool(num_cores) as pool:
+        pool.starmap(run_single_process,tasks_list)
+        
     start_merge = time.time()
     print('Starting merge, parallel processing took',start_merge-start_parallel,flush=True)
+    
+#     try:    
+#         Parallel(n_jobs=num_cores)(
+#             delayed(run_single_process)(
+#                 tasks,
+#                 fileName,
+#                 outDir,
+#                 basemods,
+#                 context_check_source,
+#                 checkAgainstRef,
+#                 referenceGenome,
+#                 pipeline,
+#                 thresholds            
+#             )
+#             for tasks in processwise_tasks.core_assignments.values()
+#         )
+#     except Exception as e:
+#         print('Error in parallel processing:',e)
+
     
     file_saver.merge_temp_files(
         processwise_tasks,
         sampleName,
         outDir,
-        outDir+'/temp',
+        outDir+'temp',
         basemods,
     )
     
-    shutil.rmtree(outDir+'/temp')
+    shutil.rmtree(outDir+'temp')
     end_merge = time.time()
     print('Merge took',end_merge-start_merge)
     
@@ -267,7 +287,7 @@ def run_single_process(
     referenceGenome,
     pipeline,
     thresholds,
-) -> None:
+):
     if referenceGenome is not None:
         genome = pysam.FastaFile(referenceGenome)
     else:
@@ -287,7 +307,7 @@ def run_single_process(
                 pipeline,
                 thresholds,
             )
-    print('finished single process',flush=True)
+#     print('finished single process',flush=True)
             
 def parse_subregion(
     region_string: str,
@@ -407,7 +427,7 @@ def parse_subregion(
         subregion_data=subregion_data,
         outDir_temp=outDir+"/temp"
     )
-    print('saved all subregion output tracks',flush=True)
+#     print('saved all subregion output tracks',flush=True)
 
 def explore_bam(
     fileName: str,

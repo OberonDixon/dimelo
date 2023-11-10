@@ -58,7 +58,7 @@ def subregion_save_all(
         else:
             print(f'Warning: plugins folders contain no module {format_key}.py')
             
-        print(format_key,'saved successfully',flush=True)
+#         print(format_key,'saved successfully',flush=True)
         
 def merge_temp_files(
     processwise_tasks: ProcesswiseTaskBuilder,
@@ -67,7 +67,9 @@ def merge_temp_files(
     outDir_temp: str,
     basemods,
 ):
+#     print('merge temp files start function',flush=True)
     for format_key in processwise_tasks.formats_list:
+        print(format_key)
         if format_key in SINGLE_READ_DICT:
             SINGLE_READ_DICT[format_key]['merge_subregion_batches'](
                 processwise_tasks,
