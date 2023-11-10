@@ -57,6 +57,8 @@ def subregion_save_all(
             )
         else:
             print(f'Warning: plugins folders contain no module {format_key}.py')
+            
+        print(format_key,'saved successfully',flush=True)
         
 def merge_temp_files(
     processwise_tasks: ProcesswiseTaskBuilder,

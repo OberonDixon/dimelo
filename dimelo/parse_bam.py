@@ -211,24 +211,26 @@ def parse_bam(
     
     start_parallel = time.time()
     print('Starting up parallel processes, tasklist took',start_parallel-start_tasklist)
-        
-    Parallel(n_jobs=num_cores)(
-        delayed(run_single_process)(
-            tasks,
-            fileName,
-            outDir,
-            basemods,
-            context_check_source,
-            checkAgainstRef,
-            referenceGenome,
-            pipeline,
-            thresholds            
+    try:    
+        Parallel(n_jobs=num_cores)(
+            delayed(run_single_process)(
+                tasks,
+                fileName,
+                outDir,
+                basemods,
+                context_check_source,
+                checkAgainstRef,
+                referenceGenome,
+                pipeline,
+                thresholds            
+            )
+            for tasks in processwise_tasks.core_assignments.values()
         )
-        for tasks in processwise_tasks.core_assignments.values()
-    )
-    
+    except Exception as e:
+        print('Error in parallel processing:',e)
+    print('Before merge timer')
     start_merge = time.time()
-    print('Starting merge, parallel processing took',start_merge-start_parallel)
+    print('Starting merge, parallel processing took',start_merge-start_parallel,flush=True)
     
     file_saver.merge_temp_files(
         processwise_tasks,
@@ -253,80 +255,7 @@ def parse_bam(
 #             thresholds
 #         )
     
-    # The next step here will be to pass the task lists down the the task runner
-    # Filenames saved by the subregion parsing function will have names derived from the tasklist metadata
-    # Then, parse_bam can merge the files and delete the temporary folder/locations
-    
-    ######################
-    # The remainder here is old code that will be replaced once the task parallelization stuff is working
-    ######################
-        
-#     if region is not None:
-#         window = Region(region)
-#         print(window.chromosome,window.begin,window.end)
-#         reads = bam.fetch(reference=window.chromosome,start=window.begin,end=window.end)
-#     else:
-#         reads = bam.fetch()
-
-    
-#     modified_pile_dict = {}
-#     valid_pile_dict = {}
-#     pile_coordinates = np.arange(window.begin,window.end)
-#     print(min(pile_coordinates),max(pile_coordinates))
-#     for basemod_identifier in basemods:
-#         modified_pile_dict[basemod_identifier] = np.zeros(window.end-window.begin)
-#         valid_pile_dict[basemod_identifier] = np.zeros(window.end-window.begin)
-#     for read in reads:
-#         valid_coordinates_list = []
-#         modified_coordinates_list = []
-# #         print(read.query_name)
-# #         print(basemods)
-# #         print('pre disambiguaton (valid/modified)')
-#         for basemod_identifier in basemods:
-#             reference_coordinates,valid_coordinates,modified_coordinates,ref_seq = read_parser.parse_read_by_basemod(
-#                 read=read,
-#                 basemod_identifier=basemod_identifier,
-#                 context_check_source=context_check_source,
-#                 validate_with_reference=checkAgainstRef,
-#                 genome=genome,
-#                 pipeline=pipeline,
-#                 threshold=thresholds[0])
-# #             print(sum(valid_coordinates),sum(modified_coordinates))
-#             valid_coordinates_list.append(valid_coordinates)
-#             modified_coordinates_list.append(modified_coordinates)
-# #         print('reference coordinates for read (start/end)')
-# #         print(min(reference_coordinates),max(reference_coordinates))
-#         valid_coordinates_list_disambiguated,modified_coordinates_list_disambiguated = read_parser.resolve_basemod_ambiguities(
-#             basemods,
-#             valid_coordinates_list,
-#             modified_coordinates_list)
-        
-# #         print('post disambiguation (valid/modified)')
-# #         for list_index,_ in enumerate(valid_coordinates_list_disambiguated):
-# #             print(sum(valid_coordinates_list_disambiguated[list_index]),
-# #                   sum(modified_coordinates_list_disambiguated[list_index]))
-        
-#         # create masks for valid reference_coordinates
-#         valid_mask = (reference_coordinates >= pile_coordinates[0]) & (reference_coordinates <= pile_coordinates[-1])
-#         read_indices = np.searchsorted(pile_coordinates,reference_coordinates[valid_mask])
-# #         print('read_indices')
-# #         print(read_indices)
-        
-#         for basemod_index,basemod_identifier in enumerate(basemods):
-#             modified_pile_dict[basemod_identifier][read_indices]+=(modified_coordinates_list_disambiguated
-#                                                                    [basemod_index][valid_mask])
-#             valid_pile_dict[basemod_identifier][read_indices]+=(valid_coordinates_list_disambiguated
-#                                                                 [basemod_index][valid_mask])
-# #             print('sum and max modified/valid',basemod_identifier)
-# #             print(sum(modified_pile_dict[basemod_identifier]),sum(valid_pile_dict[basemod_identifier]))
-# #             print(max(modified_pile_dict[basemod_identifier]),max(valid_pile_dict[basemod_identifier]))
-        
-#         if read.pos%500==0:
-#             print(f'read pos {read.pos}')
-            
     return(0,0,0)
-#     return (pile_coordinates,valid_pile_dict,modified_pile_dict)
-#             print(f'highest pileup so far is {max(valid_pile_dict[basemods[0]])}')
 
 def run_single_process(
     process_tasklist: SingleProcessTasks,
@@ -358,6 +287,7 @@ def run_single_process(
                 pipeline,
                 thresholds,
             )
+    print('finished single process',flush=True)
             
 def parse_subregion(
     region_string: str,
@@ -477,6 +407,7 @@ def parse_subregion(
         subregion_data=subregion_data,
         outDir_temp=outDir+"/temp"
     )
+    print('saved all subregion output tracks',flush=True)
 
 def explore_bam(
     fileName: str,
