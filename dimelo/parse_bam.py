@@ -24,7 +24,7 @@ import time
 import numpy as np
 import pandas as pd
 import pysam
-from joblib import Parallel, delayed
+# from joblib import Parallel, delayed
 from tqdm import tqdm
 from Bio.Seq import Seq
 

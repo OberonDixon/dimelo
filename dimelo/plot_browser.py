@@ -39,6 +39,8 @@ import pyranges as pr
 import seaborn as sns
 
 from dimelo.parse_bam import parse_bam
+from dimelo.utils.genome_regions import Region
+from dimelo.utils.file_loader import region_basemod_load_track,region_basemod_load_reads
 
 # import plotly.io as pio
 
@@ -68,22 +70,33 @@ class DataTraces(object):
             return self.traces[self.index - 1]
 
 
-class Region(object):
-    def __init__(self, region, fasta=None):
-        if ":" in region:
-            try:
-                self.chromosome, interval = region.replace(",", "").split(":")
-                self.begin, self.end = [int(i) for i in interval.split("-")]
-            except ValueError:
-                sys.exit(
-                    "\n\nERROR: Region (-w/--region) inproperly formatted, "
-                    "examples of accepted formats are:\n"
-                    "'chr5:150200605-150423790'\n\n"
-                )
-            self.size = self.end - self.begin
-            self.string = f"{self.chromosome}_{self.begin}_{self.end}"
-
-
+def plot_browser_from_file(
+    outDir,
+    sampleName,
+    bedFile,
+    basemod,
+    file_format,
+):
+    if bedFile is not None:
+        # make a region object for each row of bedFile
+        bed = pd.read_csv(bedFile, sep="\t", header=None)
+        regions = []
+        for _, row in bed.iterrows():
+            regions.append(Region(row))
+    else:
+        regions = []
+    
+    for region in regions:
+        reads_pos,reads_end,mod_arrays,valid_arrays = region_basemod_load_reads(
+            region,
+            basemod,
+            outDir,
+            sampleName,
+            file_format,
+        )
+        print(region.chromosome,region.begin,region.end)
+        print('reads aligned to',reads_pos)
+            
 def plot_browser(
     fileNames,
     sampleNames,

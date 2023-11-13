@@ -18,13 +18,46 @@ import sqlite3
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+import numpy as np
 
 from dimelo.parse_bam import parse_bam
+from dimelo.utils import file_loader
+from dimelo.utils.genome_regions import Region
+from dimelo.utils.file_loader import region_basemod_load_track,region_basemod_load_reads
 
 DEFAULT_THRESH_A = 129
 DEFAULT_THRESH_C = 129
 DEFAULT_COLOR_LIST = ["#2D1E2F", "#A9E5BB", "#610345", "#559CAD", "#5E747F"]
 
+
+def plot_enrichment_from_file(
+    outDir,
+    sampleName,
+    bedFile,
+    basemod,
+    file_format,
+):
+    if bedFile is not None:
+        # make a region object for each row of bedFile
+        bed = pd.read_csv(bedFile, sep="\t", header=None)
+        regions = []
+        for _, row in bed.iterrows():
+            regions.append(Region(row))
+    else:
+        regions = []
+    total_valid = 0
+    total_mod = 0
+    for region in regions:
+        mod_array,valid_array = region_basemod_load_track(
+            region,
+            basemod,
+            outDir,
+            sampleName,
+            file_format,
+        )
+        total_valid+=np.sum(valid_array)
+        total_mod+=np.sum(mod_array)
+    print('valid modification coordinates:',total_valid,'\nfraction modified:',total_mod/total_valid)
 
 def plot_enrichment(
     fileNames,

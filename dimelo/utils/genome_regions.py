@@ -139,6 +139,7 @@ class SubregionData(SubregionTask):
             self.read_lists_dict['read_name'].append(read_name)
             self.read_lists_dict['chr'].append(read_chr)
             self.read_lists_dict['pos'].append(read_pos)
+            self.read_lists_dict['end'].append(read_pos+len(ref_seq))
             self.read_lists_dict['is_forward'].append(read_is_forward)
             self.read_lists_dict['ref_seq'].append(ref_seq)
             self.read_lists_dict['read_seq_aligned'].append(read_seq_aligned)
